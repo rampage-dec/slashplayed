@@ -20,7 +20,7 @@
  }
  
  // rects: fractions of the window, origin bottom left.
-@@ -598,6 +604,269 @@
+@@ -598,6 +604,348 @@
  #endif
  @end
  
@@ -28,11 +28,16 @@
 +// ---- touch controls (iPhone and iPad): a stick to walk, Jump, and an action button
 +//
 +// For playing with neither a keyboard nor a game controller. Addons can't move the character (the
-+// game's movement functions are protected), so the stick lives here and presses W, A, S and D (the
-+// game's default keys: forward, turn left, back, turn right) as a keyboard would, through the same
-+// event queue sp_key fills. Jump is Space. The action button is F13, a key nothing binds by default:
-+// the SPTouch addon routes it (cast Fishing, then interact with the bobber). Two-finger drags beside
-+// the controls still turn the camera, as before, since these views take only their own touches.
++// game's movement functions are protected), so the stick lives here. Up and down press W and S (the
++// game's forward and back keys) as a keyboard would, through the same event queue sp_key fills. Left
++// and right turn the way a right-button drag does (mouselook), at a speed that follows how far the
++// stick is pushed: the keyboard's A and D turn at one slow, fixed rate.
++//
++// The buttons press keys: Jump is Space; Interact F11, Fishing F12 and Auto Run F10, which the SPTouch
++// addon binds with priority (interact with the soft target; cast Fishing, then land the catch; toggle
++// autorun). Without the addon those keys are the game's own (bags). Not F13: on a Mac that is Print
++// Screen, which the game names PRINTSCREEN and takes a screenshot with. Two-finger drags beside the
++// controls still turn the camera, as before, since these views take only their own touches.
 +//
 +// Hidden while a game controller or a hardware keyboard is connected (those have their own keys), and
 +// off altogether with SP_TOUCH_CONTROLS=0 or NSUserDefaults "sp_touch_controls" = NO.
@@ -58,18 +63,30 @@
 +    sp_post(e);
 +}
 +
-+// W, A, S, D as Mac key codes (kVK_ANSI_W, _A, _S, _D) and what they type.
-+static const unsigned short sp_stick_mac[4] = { 0x0D, 0x00, 0x01, 0x02 };
-+static NSString *const sp_stick_chars[4] = { @"w", @"a", @"s", @"d" };
++// W and S as Mac key codes (kVK_ANSI_W, kVK_ANSI_S) and what they type.
++static const unsigned short sp_stick_mac[2] = { 0x0D, 0x01 };
++static NSString *const sp_stick_chars[2] = { @"w", @"s" };
++
++// Turning, in points of right-button drag per 1/60 s at full deflection (SP_STICK_TURN overrides).
++static CGFloat sp_stick_turn_speed(void) {
++    static CGFloat speed;
++    if (!speed) speed = getenv("SP_STICK_TURN") ? atof(getenv("SP_STICK_TURN")) : 12;
++    if (speed <= 0) speed = 12;
++    return speed;
++}
 +
 +@interface SPStickView : UIView
 +- (void)sp_release;
 +@end
 +
 +@implementation SPStickView {
-+    UITouch *_touch;   // the thumb on the stick; nil when free
++    UITouch *_touch;        // the thumb on the stick; nil when free
 +    UIView *_knob;
-+    BOOL _down[4];     // W A S D, as last pressed
++    BOOL _down[2];          // W S, as last pressed
++    CGFloat _turn;          // -1 ... 1, left to right, after the dead zone and curve
++    BOOL _turning;          // the right button is down for our mouselook
++    CADisplayLink *_link;   // drives the turn while the stick is held sideways
++    CFTimeInterval _last;
 +}
 +
 +- (instancetype)initWithFrame:(CGRect)frame {
@@ -105,22 +122,68 @@
 +    sp_virtual_key(sp_stick_mac[i], sp_stick_chars[i], down);
 +}
 +
++// Mouselook from the stick: the right button goes down over the world, the turn comes as
++// right-button drags each frame, and the button comes up when the stick is back in the middle. The
++// first drag goes out with the press, so the game never sees a right click (that would interact with
++// whatever is under the pointer). A right button some finger already holds is left to that finger.
++- (void)sp_turn_step:(CFTimeInterval)dt {
++    if (!_turn) return;
++    if (!_turning) {
++        if (sp_mouse_buttons) return;  // a finger is clicking or dragging: don't fight it
++        // Over the world, above the character, where no UI frame sits: a right press over an action
++        // button, a window or the minimap would go to that frame instead of turning. sp_mouse_button
++        // moves the pointer there first. Window coordinates: origin bottom left.
++        CGRect g = sp_game_rect();
++        sp_mouse_button(1, YES, CGPointMake(g.size.width / 2, g.size.height * 0.62));
++        _turning = YES;
++    }
++    CGFloat dx = _turn * sp_stick_turn_speed() * (dt > 0 ? MIN(dt, 0.1) * 60 : 1);
++    sp_post_motion(SPRightMouseDragged, dx, 0);
++}
++
++- (void)sp_turn_end {
++    [_link invalidate];
++    _link = nil;
++    if (_turning) {
++        _turning = NO;
++        sp_mouse_button(1, NO, sp_pointer);
++    }
++}
++
++- (void)sp_tick:(CADisplayLink *)link {
++    CFTimeInterval now = link.timestamp, dt = _last ? now - _last : 1.0 / 60;
++    _last = now;
++    [self sp_turn_step:dt];
++}
++
 +- (void)sp_follow:(CGPoint)p {
 +    CGFloat r = self.bounds.size.width / 2;
 +    if (r <= 0) return;
 +    CGFloat dx = (p.x - r) / r, dy = (p.y - r) / r, len = hypot(dx, dy);
 +    if (len > 1) { dx /= len; dy /= len; }
 +    _knob.center = CGPointMake(r + dx * r * 0.6, r + dy * r * 0.6);
-+    // Forward and back past a third of the way; turning only past half, so a thumb slightly off
-+    // centre while walking straight doesn't turn.
-+    [self sp_key:0 down:dy < -0.33];
-+    [self sp_key:2 down:dy > 0.33];
-+    [self sp_key:1 down:dx < -0.5];
-+    [self sp_key:3 down:dx > 0.5];
++    // Forward and back past a quarter of the way.
++    [self sp_key:0 down:dy < -0.25];
++    [self sp_key:1 down:dy > 0.25];
++    // Turning: a dead zone of 0.2, then a curve, so a small push turns finely and a full one fast.
++    CGFloat a = fabs(dx) < 0.2 ? 0 : (fabs(dx) - 0.2) / 0.8;
++    _turn = (dx < 0 ? -1 : 1) * a * a;
++    if (_turn) {
++        if (!_link) {
++            _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(sp_tick:)];
++            [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
++            _last = 0;
++            [self sp_turn_step:1.0 / 60];  // the press and its first drag together, right now
++        }
++    } else {
++        [self sp_turn_end];
++    }
 +}
 +
 +- (void)sp_release {
-+    for (int i = 0; i < 4; i++) [self sp_key:i down:NO];
++    for (int i = 0; i < 2; i++) [self sp_key:i down:NO];
++    _turn = 0;
++    [self sp_turn_end];
 +    _touch = nil;
 +    CGFloat r = self.bounds.size.width / 2;
 +    _knob.center = CGPointMake(r, r);
@@ -168,7 +231,8 @@
 +    _label = [[UILabel alloc] init];
 +    _label.text = title;
 +    _label.textColor = [UIColor colorWithWhite:1 alpha:0.9];
-+    _label.font = [UIFont boldSystemFontOfSize:13];
++    _label.font = [UIFont boldSystemFontOfSize:14];
++    _label.numberOfLines = 2;
 +    _label.textAlignment = NSTextAlignmentCenter;
 +    _label.adjustsFontSizeToFitWidth = YES;
 +    _label.minimumScaleFactor = 0.6;
@@ -179,8 +243,10 @@
 +
 +- (void)layoutSubviews {
 +    [super layoutSubviews];
-+    self.layer.cornerRadius = self.bounds.size.width / 2;
-+    _label.frame = CGRectInset(self.bounds, 6, 6);
++    CGFloat d = self.bounds.size.width;
++    self.layer.cornerRadius = d / 2;
++    _label.font = [UIFont boldSystemFontOfSize:MAX(12, d * 0.17)];
++    _label.frame = CGRectInset(self.bounds, d * 0.1, d * 0.1);
 +}
 +
 +- (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent *)event {
@@ -218,7 +284,7 @@
 +
 +@implementation SPTouchControls {
 +    SPStickView *_stick;
-+    SPPadButton *_jump, *_action;
++    SPPadButton *_interact, *_fish, *_jump, *_autorun;
 +}
 +
 +- (instancetype)initWithFrame:(CGRect)frame {
@@ -226,11 +292,11 @@
 +    self.backgroundColor = UIColor.clearColor;
 +    self.multipleTouchEnabled = YES;
 +    _stick = [[SPStickView alloc] initWithFrame:CGRectZero];
-+    _jump = [[SPPadButton alloc] initWithTitle:@"Springen" mac:0x31 chars:@" "];   // Space
-+    _action = [[SPPadButton alloc] initWithTitle:@"Angeln" mac:0x69 chars:nil];    // F13
-+    [self addSubview:_stick];
-+    [self addSubview:_jump];
-+    [self addSubview:_action];
++    _interact = [[SPPadButton alloc] initWithTitle:@"Inter-\nagieren" mac:0x67 chars:nil];  // F11
++    _fish = [[SPPadButton alloc] initWithTitle:@"Angeln" mac:0x6F chars:nil];               // F12
++    _jump = [[SPPadButton alloc] initWithTitle:@"Springen" mac:0x31 chars:@" "];            // Space
++    _autorun = [[SPPadButton alloc] initWithTitle:@"Auto-\nLauf" mac:0x6D chars:nil];        // F10
++    for (UIView *v in @[ _stick, _interact, _fish, _jump, _autorun ]) [self addSubview:v];
 +    __weak SPTouchControls *weak = self;
 +    void (^update)(NSNotification *) = ^(NSNotification *n) { [weak sp_update_hidden]; };
 +    for (NSNotificationName name in @[ GCControllerDidConnectNotification, GCControllerDidDisconnectNotification,
@@ -252,8 +318,7 @@
 +
 +- (void)sp_release_all {
 +    [_stick sp_release];
-+    [_jump sp_release];
-+    [_action sp_release];
++    for (SPPadButton *b in @[ _interact, _fish, _jump, _autorun ]) [b sp_release];
 +}
 +
 +- (void)sp_update_hidden {
@@ -269,20 +334,34 @@
 +}
 +
 +// Placed from the game rect (the window less the Dynamic Island's strip), sized from its height, so
-+// they sit the same on every iPhone and iPad: the stick bottom left, the buttons bottom right, above
-+// where the game keeps its action bars.
++// they sit the same on every iPhone and iPad. Large, for a thumb: the stick lower left with Auto Run
++// above it, and on the right Interact, the one used most, biggest and lowest, where the thumb rests,
++// with Fishing to its left and Jump above it. Well clear of the screen's edges: the root view defers
++// the system's edge gestures (preferredScreenEdgesDeferringSystemGestures), and for that iOS holds
++// back touches that start near an edge, which made a stick in the corner answer late.
 +- (void)layoutSubviews {
 +    [super layoutSubviews];
 +    CGRect g = sp_game_rect();
 +    if (CGRectIsEmpty(g)) g = self.bounds;
++    CGRect b = self.bounds;
 +    CGFloat h = g.size.height;
-+    CGFloat r = MIN(h * 0.17, 90);
++    CGFloat margin = MAX(h * 0.09, 40);  // from the screen's edges, not the game rect's
++    CGFloat bottom = MIN(CGRectGetMaxY(g), CGRectGetMaxY(b) - margin);
++    CGFloat left = MAX(CGRectGetMinX(g) + h * 0.04, CGRectGetMinX(b) + margin);
++    CGFloat right = MIN(CGRectGetMaxX(g) - h * 0.04, CGRectGetMaxX(b) - margin);
++
++    CGFloat r = MIN(h * 0.19, 96);       // the stick's radius
 +    _stick.bounds = CGRectMake(0, 0, 2 * r, 2 * r);
-+    _stick.center = CGPointMake(CGRectGetMinX(g) + r + h * 0.06, CGRectGetMaxY(g) - r - h * 0.10);
-+    CGFloat d = MIN(h * 0.16, 84);
-+    _jump.bounds = _action.bounds = CGRectMake(0, 0, d, d);
-+    _jump.center = CGPointMake(CGRectGetMaxX(g) - d / 2 - h * 0.05, CGRectGetMaxY(g) - d / 2 - h * 0.22);
-+    _action.center = CGPointMake(_jump.center.x - d * 1.15, _jump.center.y - d * 0.6);
++    _stick.center = CGPointMake(left + r, bottom - r - h * 0.02);
++
++    CGFloat big = MIN(h * 0.22, 104), mid = MIN(h * 0.17, 84), small = MIN(h * 0.13, 64);
++    _interact.bounds = CGRectMake(0, 0, big, big);
++    _fish.bounds = _jump.bounds = CGRectMake(0, 0, mid, mid);
++    _autorun.bounds = CGRectMake(0, 0, small, small);
++    _interact.center = CGPointMake(right - big / 2, bottom - big / 2 - h * 0.02);
++    _fish.center = CGPointMake(_interact.center.x - big / 2 - mid * 0.75, _interact.center.y - big * 0.45);
++    _jump.center = CGPointMake(_interact.center.x, _interact.center.y - big / 2 - mid * 0.8);
++    _autorun.center = CGPointMake(_stick.center.x + r * 0.9, _stick.center.y - r - small * 0.75);
 +}
 +@end
 +#endif
@@ -290,7 +369,7 @@
  // ---- the UIKit side: the scene's root view collects input
  
  @interface SPInputView : UIView <UIPointerInteractionDelegate>
-@@ -708,6 +977,12 @@
+@@ -708,6 +1056,12 @@
      sp_cursor_view.hidden = YES;
      sp_cursor_view.layer.zPosition = 2000;
      [self addSubview:sp_cursor_view];
@@ -302,4 +381,4 @@
 +#endif
      if (!getenv("SP_CURSOR_SYSTEM")) [self addInteraction:[[UIPointerInteraction alloc] initWithDelegate:self]];
      [NSNotificationCenter.defaultCenter addObserverForName:UIPointerLockStateDidChangeNotification object:nil queue:nil
-                                                 usingBlock:^(NSNotification *n) {
+                                  
