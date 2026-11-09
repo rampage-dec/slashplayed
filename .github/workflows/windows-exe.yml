@@ -1,0 +1,52 @@
+name: Build Windows exe
+ 
+on:
+  workflow_dispatch:
+ 
+permissions:
+  contents: read
+ 
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Strawberry Perl fuer OpenSSLs Configure (das Perl von Git Bash taugt dafuer nicht).
+      OPENSSL_SRC_PERL: C:\Strawberry\perl\bin\perl.exe
+    steps:
+      - name: Keep line endings
+        run: git config --global core.autocrlf false
+ 
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+ 
+      - name: Install the pinned Rust toolchain
+        working-directory: apps/companion-rs
+        run: |
+          set -euo pipefail
+          TC=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "Rust $TC"
+          rustup toolchain install "$TC" --profile minimal
+ 
+      - name: Fetch zsign's source
+        run: scripts/build-zsign.sh source
+ 
+      - name: Build
+        working-directory: apps/companion-rs
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+ 
+      - name: Show the result
+        run: |
+          ls -l apps/companion-rs/target/x86_64-pc-windows-msvc/release/slashplayed-companion.exe
+          sha256sum apps/companion-rs/target/x86_64-pc-windows-msvc/release/slashplayed-companion.exe
+ 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slashplayed-companion-windows
+          path: apps/companion-rs/target/x86_64-pc-windows-msvc/release/slashplayed-companion.exe
+          if-no-files-found: error
+          retention-days: 30
