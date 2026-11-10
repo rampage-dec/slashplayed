@@ -12,7 +12,7 @@
 +    [sp_touch_controls setNeedsLayout];
 +#endif
  }
-@@ -600,2 +606,1881 @@
+@@ -600,2 +606,1987 @@
  
 +#if !TARGET_OS_VISION
 +// ---- touch controls (iPhone and iPad): a stick to walk, a camera pad, buttons, and a keyboard
@@ -54,7 +54,7 @@
 +
 +// ---- settings: the panel's rows, in order, and what each is saved as
 +
-+enum { SP_TS_STICK, SP_TS_BUTTONS, SP_TS_SIDE, SP_TS_CENTER, SP_TS_LOOK, SP_TS_OPACITY, SP_TS_HAPTICS, SP_TS_COUNT };
++enum { SP_TS_STICK, SP_TS_BUTTONS, SP_TS_SIDE, SP_TS_CENTER, SP_TS_LOOK, SP_TS_OPACITY, SP_TS_HAPTICS, SP_TS_GRID, SP_TS_COUNT };
 +
 +static const struct {
 +    const char *key, *title;
@@ -68,6 +68,7 @@
 +    { "sp_touch_look", "Kamera-Feld", { "Aus", "Langsam", "Mittel", "Schnell" }, 4, 2 },
 +    { "sp_touch_opacity", "Deckkraft", { "Schwach", "Mittel", "Voll" }, 3, 2 },
 +    { "sp_touch_haptics", "Vibration", { "Aus", "An" }, 2, 1 },
++    { "sp_touch_grid", "Raster (Bearbeiten)", { "Aus", "An" }, 2, 1 },
 +};
 +
 +static int sp_ts[SP_TS_COUNT];
@@ -125,6 +126,7 @@
 +static BOOL sp_touch_editing;
 +static void (^sp_touch_edit_done)(UIView *view, BOOL moved);
 +static void (^sp_touch_edit_moving)(UIView *view);   // during a drag: for the trash's highlight
++static CGPoint (^sp_touch_edit_snap)(UIView *view, CGPoint centre);   // during a drag: the grid's place
 +static UIView *sp_edit_view;
 +static UITouch *sp_edit_touch;
 +static CGPoint sp_edit_from, sp_edit_center;
@@ -150,7 +152,9 @@
 +    CGFloat dx = p.x - sp_edit_from.x, dy = p.y - sp_edit_from.y;
 +    if (!sp_edit_moved && hypot(dx, dy) < 8) return YES;   // a tap's wobble isn't a move
 +    sp_edit_moved = YES;
-+    v.center = CGPointMake(sp_edit_center.x + dx, sp_edit_center.y + dy);
++    CGPoint c = CGPointMake(sp_edit_center.x + dx, sp_edit_center.y + dy);
++    if (sp_touch_edit_snap) c = sp_touch_edit_snap(v, c);
++    v.center = c;
 +    if (sp_touch_edit_moving) sp_touch_edit_moving(v);
 +    return YES;
 +}
@@ -1090,6 +1094,9 @@
 +    { "9", "key", 0x19, "9", 2 }, { "0", "key", 0x1D, "0", 2 }, { "Q", "key", 0x0C, "q", 2 }, { "E", "key", 0x0E, "e", 2 },
 +    { "R", "key", 0x0F, "r", 2 }, { "T", "key", 0x11, "t", 2 }, { "F", "key", 0x03, "f", 2 }, { "G", "key", 0x05, "g", 2 },
 +    { "X", "key", 0x07, "x", 2 }, { "V", "key", 0x09, "v", 2 }, { "Tab", "key", 0x30, "\t", 2 },
++    // F4 to F12 are the touch controls' own keys (SPTouch binds them with priority): the addon's list has
++    // every key the player has bound, those too, as fight buttons.
++    { "F1", "key", 0x7A, "", 2 }, { "F2", "key", 0x78, "", 2 }, { "F3", "key", 0x63, "", 2 },
 +};
 +static const int sp_add_count = (int)(sizeof sp_add_items / sizeof sp_add_items[0]);
 +
@@ -1117,11 +1124,14 @@
 +    _title.textColor = UIColor.whiteColor;
 +    [self addSubview:_title];
 +    NSMutableArray *sections = [NSMutableArray array];
-+    for (NSString *t in @[ @"Steuerung", @"Fenster im Spiel", @"Tasten (tun, was im Spiel auf ihnen liegt)" ]) {
++    for (NSString *t in @[ @"Steuerung", @"Fenster im Spiel",
++                           @"Tasten (tun, was im Spiel auf ihnen liegt; alle belegten, auch F4–F12: \"+ Fähigkeit\" → Tasten)" ]) {
 +        UILabel *l = [[UILabel alloc] init];
 +        l.text = t;
 +        l.font = [UIFont systemFontOfSize:12];
 +        l.textColor = [UIColor colorWithWhite:1 alpha:0.6];
++        l.adjustsFontSizeToFitWidth = YES;
++        l.minimumScaleFactor = 0.7;
 +        [sections addObject:l];
 +        [self addSubview:l];
 +    }
@@ -1166,7 +1176,7 @@
 +    if (_cancel) _cancel();
 +}
 +
-+// Six to a row for the first two sections, ten for the keys; the rows as tall as fit.
++// Six to a row for the first two sections, eleven for the keys; the rows as tall as fit.
 +- (void)layoutSubviews {
 +    [super layoutSubviews];
 +    CGRect b = self.bounds;
@@ -1177,7 +1187,7 @@
 +    for (int s = 0; s < 3; s++) {
 +        _sections[s].frame = CGRectMake(pad, y, w, 16);
 +        y += 18;
-+        int cols = s == 2 ? 10 : 6, n = 0;
++        int cols = s == 2 ? 11 : 6, n = 0;
 +        CGFloat bw = (w - (cols - 1) * gap) / cols;
 +        for (int i = 0; i < sp_add_count; i++) {
 +            if (sp_add_items[i].section != s) continue;
@@ -1226,6 +1236,42 @@
 +- (void)layoutSubviews {
 +    [super layoutSubviews];
 +    _label.frame = CGRectInset(self.bounds, 8, 2);
++}
++@end
++
++// ---- the grid in edit mode: dots where a control's centre can sit. 32 rows over the game's height,
++// squares, from the game rect's corner; the SPTouch addon snaps its fight buttons to the same grid, so
++// both line up.
++
++static const CGFloat sp_grid_rows = 32;
++
++@interface SPGridView : UIView
++@property(nonatomic) CGRect game;
++@end
++
++@implementation SPGridView
++- (instancetype)initWithFrame:(CGRect)frame {
++    if (!(self = [super initWithFrame:frame])) return nil;
++    self.userInteractionEnabled = NO;
++    self.opaque = NO;
++    self.backgroundColor = UIColor.clearColor;
++    return self;
++}
++
++- (void)setGame:(CGRect)game {
++    if (CGRectEqualToRect(game, _game)) return;
++    _game = game;
++    [self setNeedsDisplay];
++}
++
++- (void)drawRect:(CGRect)rect {
++    CGRect g = _game;
++    if (g.size.height <= 0) return;
++    CGFloat step = g.size.height / sp_grid_rows;
++    [[UIColor colorWithWhite:1 alpha:0.25] setFill];
++    for (CGFloat y = g.origin.y; y <= CGRectGetMaxY(g) + 0.5; y += step)
++        for (CGFloat x = g.origin.x; x <= CGRectGetMaxX(g) + 0.5; x += step)
++            UIRectFill(CGRectMake(x - 1, y - 1, 2, 2));
 +}
 +@end
 +
@@ -1301,6 +1347,8 @@
 +    SPEditBanner *_banner;   // in edit mode
 +    SPAddPanel *_adder;      // in edit mode, after + Taste
 +    SPTrashView *_trash;     // in edit mode
++    SPGridView *_grid;       // in edit mode, with the grid on
++    UIView *_guide_x, *_guide_y;   // in edit mode: the lines a dragged control lines up on
 +    BOOL _user_on;           // Touch on with no controller or keyboard connected (saved: sp_touch_on)
 +    BOOL _on_with_device;    // Touch on while one is (not saved: each connection starts with it off)
 +    BOOL _editing;
@@ -1345,6 +1393,10 @@
 +    for (UIView *v in @[ _toggle, _page_button, _gear, _map, _esc, _kbd ]) [self addSubview:v];
 +    sp_touch_edit_done = ^(UIView *v, BOOL moved) { [weak sp_edit_finished:v moved:moved]; };
 +    sp_touch_edit_moving = ^(UIView *v) { [weak sp_edit_moving:v]; };
++    sp_touch_edit_snap = ^CGPoint(UIView *v, CGPoint c) {
++        SPTouchControls *me = weak;
++        return me ? [me sp_snap:v to:c] : c;
++    };
 +    _sink = [[SPKeyboardSink alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
 +    _sink.changed = ^(BOOL open) { [weak sp_keyboard_changed:open]; };
 +    [self addSubview:_sink];
@@ -1575,14 +1627,32 @@
 +        _banner.done = ^{ [weak sp_edit:NO]; };
 +        _banner.small = _banner_small;
 +        [self addSubview:_banner];
-+        // Under the controls, so one dragged onto it stays in sight.
++        // Under the controls, so one dragged onto it stays in sight; the grid under that.
 +        _trash = [[SPTrashView alloc] initWithFrame:CGRectZero];
 +        [self insertSubview:_trash belowSubview:_pad];
++        if (sp_ts[SP_TS_GRID]) {
++            _grid = [[SPGridView alloc] initWithFrame:self.bounds];
++            [self insertSubview:_grid belowSubview:_trash];
++        }
++        UIColor *line = [UIColor colorWithRed:1 green:0.78 blue:0.2 alpha:0.9];
++        _guide_x = [[UIView alloc] init];
++        _guide_y = [[UIView alloc] init];
++        for (UIView *g in @[ _guide_x, _guide_y ]) {
++            g.backgroundColor = line;
++            g.userInteractionEnabled = NO;
++            g.hidden = YES;
++            [self insertSubview:g belowSubview:_pad];
++        }
 +    } else {
 +        [_banner removeFromSuperview];
 +        _banner = nil;
 +        [_trash removeFromSuperview];
++        [_grid removeFromSuperview];
++        [_guide_x removeFromSuperview];
++        [_guide_y removeFromSuperview];
 +        _trash = nil;
++        _grid = nil;
++        _guide_x = _guide_y = nil;
 +        [self sp_hide_adder];
 +    }
 +    _gear.on = on;
@@ -1613,6 +1683,37 @@
 +    return _trash && v != _stick && CGRectContainsPoint(CGRectInset(_trash.frame, -10, -10), v.center);
 +}
 +
++// The grid's place nearest a dragged control's centre; or, within most of a grid step, another
++// control's centre line (across or down), drawn as a guide while it holds. Off in the settings: free.
++- (CGPoint)sp_snap:(UIView *)v to:(CGPoint)p {
++    _guide_x.hidden = _guide_y.hidden = YES;
++    if (!sp_ts[SP_TS_GRID]) return p;
++    CGRect g = [self sp_game];
++    if (g.size.height <= 0) return p;
++    CGFloat step = g.size.height / sp_grid_rows, nearX = step * 0.6, nearY = step * 0.6;
++    CGFloat lineX = NAN, lineY = NAN;
++    NSMutableArray<UIView *> *others = [NSMutableArray arrayWithObject:_stick];
++    [others addObjectsFromArray:_views];
++    for (UIView *o in others) {
++        if (o == v || o.hidden) continue;
++        CGPoint c = o.center;
++        if (fabs(c.x - p.x) < nearX) { nearX = fabs(c.x - p.x); lineX = c.x; }
++        if (fabs(c.y - p.y) < nearY) { nearY = fabs(c.y - p.y); lineY = c.y; }
++    }
++    CGPoint q;
++    q.x = isnan(lineX) ? g.origin.x + round((p.x - g.origin.x) / step) * step : lineX;
++    q.y = isnan(lineY) ? g.origin.y + round((p.y - g.origin.y) / step) * step : lineY;
++    if (!isnan(lineX)) {
++        _guide_x.frame = CGRectMake(q.x - 0.75, CGRectGetMinY(g), 1.5, g.size.height);
++        _guide_x.hidden = NO;
++    }
++    if (!isnan(lineY)) {
++        _guide_y.frame = CGRectMake(CGRectGetMinX(g), q.y - 0.75, g.size.width, 1.5);
++        _guide_y.hidden = NO;
++    }
++    return q;
++}
++
 +- (void)sp_edit_moving:(UIView *)v {
 +    _trash.hot = [self sp_over_trash:v];
 +}
@@ -1622,6 +1723,7 @@
 +- (void)sp_edit_finished:(UIView *)v moved:(BOOL)moved {
 +    BOOL trashed = moved && [self sp_over_trash:v];
 +    _trash.hot = NO;
++    _guide_x.hidden = _guide_y.hidden = YES;
 +    CGRect g = [self sp_game];
 +    if (g.size.width <= 0 || g.size.height <= 0) return;
 +    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
@@ -1879,6 +1981,10 @@
 +        _banner.frame = CGRectMake(CGRectGetMidX(g) - bw / 2, CGRectGetMinY(g) + 6, bw, bh);
 +    }
 +    if (_trash) _trash.frame = CGRectMake(CGRectGetMidX(g) - 130, CGRectGetMaxY(g) - 60, 260, 46);
++    if (_grid) {
++        _grid.frame = b;
++        _grid.game = g;
++    }
 +    if (_adder) {
 +        CGFloat aw = MIN(600, g.size.width - 40), ah = MIN(330, h - 20);
 +        _adder.frame = CGRectMake(CGRectGetMidX(g) - aw / 2, CGRectGetMidY(g) - ah / 2, aw, ah);
@@ -1894,7 +2000,7 @@
 +#endif
 +
  // ---- the UIKit side: the scene's root view collects input
-@@ -710,2 +2595,8 @@
+@@ -710,2 +2701,8 @@
      [self addSubview:sp_cursor_view];
 +#if !TARGET_OS_VISION
 +    sp_touch_controls = [[SPTouchControls alloc] initWithFrame:self.bounds];
@@ -1903,7 +2009,7 @@
 +    [self addSubview:sp_touch_controls];
 +#endif
      if (!getenv("SP_CURSOR_SYSTEM")) [self addInteraction:[[UIPointerInteraction alloc] initWithDelegate:self]];
-@@ -750,2 +2641,3 @@
+@@ -750,2 +2747,3 @@
      if (![super pointInside:point withEvent:event]) return NO;
 +    if (sp_touch_controls_claim(self, point)) return YES;  // the touch controls' buttons in the strip
      return !sp_told_rect.size.width || CGRectContainsPoint(sp_game_rect(), point);
