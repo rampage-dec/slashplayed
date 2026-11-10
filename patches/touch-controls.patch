@@ -12,7 +12,7 @@
 +    [sp_touch_controls setNeedsLayout];
 +#endif
  }
-@@ -600,2 +606,1061 @@
+@@ -600,2 +606,1089 @@
  
 +#if !TARGET_OS_VISION
 +// ---- touch controls (iPhone and iPad): a stick to walk, a camera pad, buttons, and a keyboard
@@ -29,11 +29,11 @@
 +// with. The camera pad is a right-button drag, as a two-finger drag is (sp_chord_resolve), which turns
 +// the character and the camera; a tap on it is a left click where it landed.
 +//
-+// Four buttons sit in the strip beside the game (an iPhone's Dynamic Island side), always there: Touch
++// Five buttons sit in the strip beside the game (an iPhone's Dynamic Island side), always there: Touch
 +// shows and hides the rest (hidden by itself while a game controller or a hardware keyboard is
 +// connected), the gear opens the settings (sizes, the stick's sideways keys, the camera pad's speed,
-+// opacity, vibration; NSUserDefaults "sp_touch_*"), Esc is Escape, and the keyboard button opens the
-+// system keyboard, whose text goes to the game as key presses. Off altogether with SP_TOUCH_CONTROLS=0
++// opacity, vibration; NSUserDefaults "sp_touch_*"), the map button is M (the game's world map), Esc is
++// Escape, and the keyboard button opens the system keyboard, whose text goes to the game as key presses. Off altogether with SP_TOUCH_CONTROLS=0
 +// or NSUserDefaults "sp_touch_controls" = NO.
 +
 +static BOOL sp_touch_controls_wanted(void) {
@@ -602,7 +602,6 @@
 +
 +- (instancetype)initWithFrame:(CGRect)frame {
 +    if (!(self = [super initWithFrame:frame])) return nil;
-+    self.userInteractionEnabled = NO;
 +    self.backgroundColor = UIColor.clearColor;
 +    _typed = [NSMutableString string];
 +    _bar = [[SPKeyBar alloc] initWithFrame:CGRectMake(0, 0, 320, 44)];
@@ -648,6 +647,20 @@
 +
 +- (UIView *)inputAccessoryView {
 +    return _bar;
++}
++
++// Never a touch's view: it's only the keyboard's first responder.
++- (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent *)event {
++    return NO;
++}
++
++// A hardware keyboard's presses while this has the keyboard: its text comes as insertText: too, so
++// passing them on (up the responder chain to the root view's pressesBegan:) would type it twice.
++- (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
++}
++- (void)pressesEnded:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
++}
++- (void)pressesCancelled:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
 +}
 +
 +- (BOOL)canBecomeFirstResponder {
@@ -841,7 +854,7 @@
 +    SPStickView *_stick;
 +    SPPadButton *_interact, *_fish, *_jump, *_autorun;
 +    SPLookPad *_look;
-+    SPStripButton *_toggle, *_gear, *_esc, *_kbd;
++    SPStripButton *_toggle, *_gear, *_map, *_esc, *_kbd;
 +    SPKeyboardSink *_sink;
 +    SPSettingsPanel *_panel;
 +    BOOL _user_on;        // Touch on with no controller or keyboard connected (saved: sp_touch_on)
@@ -872,12 +885,14 @@
 +    _toggle.hold = ^{ [weak sp_settings]; };
 +    _gear = [[SPStripButton alloc] initWithTitle:@"⚙︎" symbol:@"gearshape"];
 +    _gear.tap = ^{ [weak sp_settings]; };
++    _map = [[SPStripButton alloc] initWithTitle:@"Karte" symbol:@"map"];
++    _map.tap = ^{ sp_virtual_tap(0x2E, @"m"); };   // M: the world map, open and closed
 +    _esc = [[SPStripButton alloc] initWithTitle:@"Esc" symbol:nil];
 +    _esc.tap = ^{ sp_virtual_tap(0x35, nil); };
 +    _kbd = [[SPStripButton alloc] initWithTitle:@"Tast." symbol:@"keyboard"];
 +    _kbd.tap = ^{ [weak sp_keyboard:YES]; };
 +    _kbd.hold = ^{ [weak sp_keyboard:NO]; };   // the keyboard alone, for a text box already tapped
-+    for (UIView *v in @[ _toggle, _gear, _esc, _kbd ]) [self addSubview:v];
++    for (UIView *v in @[ _toggle, _gear, _map, _esc, _kbd ]) [self addSubview:v];
 +    _sink = [[SPKeyboardSink alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
 +    _sink.changed = ^(BOOL open) { [weak sp_keyboard_changed:open]; };
 +    [self addSubview:_sink];
@@ -988,7 +1003,7 @@
 +// where the root view takes no touch).
 +- (BOOL)sp_claims:(CGPoint)p {
 +    if (self.hidden) return NO;
-+    for (UIView *v in @[ _toggle, _gear, _esc, _kbd ])
++    for (UIView *v in @[ _toggle, _gear, _map, _esc, _kbd ])
 +        if (!v.hidden && [v pointInside:[self convertPoint:p toView:v] withEvent:nil]) return YES;
 +    return _panel && CGRectContainsPoint(_panel.frame, p);
 +}
@@ -1031,32 +1046,45 @@
 +    CGFloat lx0 = MAX(lx1 - big * 1.5, CGRectGetMidX(g) + 20), ly0 = MAX(ly1 - big * 1.05, CGRectGetMinY(g) + h * 0.12);
 +    _look.frame = CGRectMake(lx0, ly0, MAX(0, lx1 - lx0), MAX(0, ly1 - ly0));
 +
-+    // The strip's buttons: Touch and the gear at its top, Esc and the keyboard at its bottom, clear of
-+    // the island in the middle and of the screen's rounded corners. With no strip (an iPad), a column
-+    // at the game's left edge, around the middle.
++    // The strip's buttons: Touch and the gear at its top; the map, Esc, and the keyboard at its bottom
++    // (the keyboard lowest, nearest the thumb); each group clear of the island in the middle, and kept
++    // out of the screen's rounded corners (closing up rather than going further). With no strip (an
++    // iPad), a column at the game's left edge, around the middle.
 +    CGRect strip = CGRectNull;
 +    if (CGRectGetMinX(g) - CGRectGetMinX(b) >= 30)
 +        strip = CGRectMake(CGRectGetMinX(b), CGRectGetMinY(b), CGRectGetMinX(g) - CGRectGetMinX(b), b.size.height);
 +    else if (CGRectGetMaxX(b) - CGRectGetMaxX(g) >= 30)
 +        strip = CGRectMake(CGRectGetMaxX(g), CGRectGetMinY(b), CGRectGetMaxX(b) - CGRectGetMaxX(g), b.size.height);
-+    CGFloat bw, bh = 40, x;
-+    CGFloat ys[4];
++    NSArray<UIView *> *upper = @[ _toggle, _gear ], *lower = @[ _map, _esc, _kbd ];
 +    if (!CGRectIsNull(strip)) {
-+        bw = MIN(strip.size.width - 6, 50);
-+        x = CGRectGetMidX(strip);
-+        ys[0] = CGRectGetMinY(strip) + 80;
-+        ys[1] = ys[0] + 48;
-+        ys[3] = CGRectGetMaxY(strip) - 80;
-+        ys[2] = ys[3] - 48;
++        CGFloat bw = MIN(strip.size.width - 6, 50), bh = 34, pitch = 40, x = CGRectGetMidX(strip);
++        CGFloat t0 = CGRectGetMinY(strip) + 76, t1 = t0 + (upper.count - 1) * pitch;   // centres, top down
++        CGFloat l1 = CGRectGetMaxY(strip) - 58, l0 = l1 - (lower.count - 1) * pitch;
++        if (!CGRectIsNull(sp_game_island) && !CGRectIsEmpty(sp_game_island)) {
++            CGFloat over = t1 + bh / 2 + 6 - CGRectGetMinY(sp_game_island);
++            CGFloat under = CGRectGetMaxY(sp_game_island) + 6 - (l0 - bh / 2);
++            if (over > 0) { t0 -= over; t1 -= over; }
++            if (under > 0) { l0 += under; l1 += under; }
++        }
++        t0 = MAX(t0, CGRectGetMinY(strip) + 26 + bh / 2);
++        l1 = MIN(l1, CGRectGetMaxY(strip) - 26 - bh / 2);
++        CGFloat tp = (t1 - t0) / (upper.count - 1), lp = (l1 - l0) / (lower.count - 1);
++        CGFloat th = MAX(20, MIN(bh, tp - 4)), lh = MAX(20, MIN(bh, lp - 4));
++        for (NSUInteger i = 0; i < upper.count; i++) {
++            upper[i].bounds = CGRectMake(0, 0, bw, th);
++            upper[i].center = CGPointMake(x, t0 + i * tp);
++        }
++        for (NSUInteger i = 0; i < lower.count; i++) {
++            lower[i].bounds = CGRectMake(0, 0, bw, lh);
++            lower[i].center = CGPointMake(x, l0 + i * lp);
++        }
 +    } else {
-+        bw = 50;
-+        x = CGRectGetMinX(g) + 8 + bw / 2;
-+        for (int i = 0; i < 4; i++) ys[i] = CGRectGetMidY(g) + (i - 1.5) * 50;
-+    }
-+    NSArray<UIView *> *col = @[ _toggle, _gear, _esc, _kbd ];
-+    for (int i = 0; i < 4; i++) {
-+        col[i].bounds = CGRectMake(0, 0, bw, bh);
-+        col[i].center = CGPointMake(x, ys[i]);
++        NSArray<UIView *> *col = [upper arrayByAddingObjectsFromArray:lower];
++        CGFloat x = CGRectGetMinX(g) + 8 + 25;
++        for (NSUInteger i = 0; i < col.count; i++) {
++            col[i].bounds = CGRectMake(0, 0, 50, 38);
++            col[i].center = CGPointMake(x, CGRectGetMidY(g) + (i - (col.count - 1) / 2.0) * 46);
++        }
 +    }
 +
 +    if (_panel) {
@@ -1074,7 +1102,7 @@
 +#endif
 +
  // ---- the UIKit side: the scene's root view collects input
-@@ -710,2 +1775,8 @@
+@@ -710,2 +1803,8 @@
      [self addSubview:sp_cursor_view];
 +#if !TARGET_OS_VISION
 +    sp_touch_controls = [[SPTouchControls alloc] initWithFrame:self.bounds];
@@ -1083,7 +1111,7 @@
 +    [self addSubview:sp_touch_controls];
 +#endif
      if (!getenv("SP_CURSOR_SYSTEM")) [self addInteraction:[[UIPointerInteraction alloc] initWithDelegate:self]];
-@@ -750,2 +1821,3 @@
+@@ -750,2 +1849,3 @@
      if (![super pointInside:point withEvent:event]) return NO;
 +    if (sp_touch_controls_claim(self, point)) return YES;  // the touch controls' buttons in the strip
      return !sp_told_rect.size.width || CGRectContainsPoint(sp_game_rect(), point);
