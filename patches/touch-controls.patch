@@ -12,7 +12,7 @@
 +    [sp_touch_controls setNeedsLayout];
 +#endif
  }
-@@ -600,2 +606,1987 @@
+@@ -600,2 +606,2001 @@
  
 +#if !TARGET_OS_VISION
 +// ---- touch controls (iPhone and iPad): a stick to walk, a camera pad, buttons, and a keyboard
@@ -82,9 +82,12 @@
 +    }
 +}
 +
++// Every write straight to disk: the game is killed, not quit, when the app is closed, and the
++// defaults' own lazy write never comes then (the shims' CFPreferences writes synchronize too).
 +static void sp_ts_set(int row, int value) {
 +    sp_ts[row] = value;
 +    [NSUserDefaults.standardUserDefaults setInteger:value forKey:@(sp_ts_rows[row].key)];
++    [NSUserDefaults.standardUserDefaults synchronize];
 +}
 +
 +static const CGFloat sp_ts_size[3] = { 0.8, 1.0, 1.2 };
@@ -1409,7 +1412,11 @@
 +    // Leaving the app mid-walk lifts every key, so the character doesn't keep running.
 +    [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationWillResignActiveNotification object:nil
 +                                                     queue:NSOperationQueue.mainQueue
-+                                                usingBlock:^(NSNotification *n) { [weak sp_release_all]; }];
++                                                usingBlock:^(NSNotification *n) {
++        [weak sp_release_all];
++        // The app may be closed from here on, with no clean exit: the layout to disk now.
++        [NSUserDefaults.standardUserDefaults synchronize];
++    }];
 +    // The keyboard can go without Fertig (an iPad's hide key): the root view takes the keys again.
 +    [NSNotificationCenter.defaultCenter addObserverForName:UIKeyboardDidHideNotification object:nil
 +                                                     queue:NSOperationQueue.mainQueue
@@ -1457,6 +1464,7 @@
 +- (void)sp_save_pages {
 +    [NSUserDefaults.standardUserDefaults setObject:_pages forKey:@"sp_touch_pages"];
 +    [NSUserDefaults.standardUserDefaults setInteger:_page forKey:@"sp_touch_page"];
++    [NSUserDefaults.standardUserDefaults synchronize];
 +}
 +
 +- (NSMutableArray<NSMutableDictionary *> *)sp_items {
@@ -1503,6 +1511,7 @@
 +    NSInteger n = (NSInteger)_pages.count;
 +    _page = ((page - 1) % n + n) % n + 1;
 +    [NSUserDefaults.standardUserDefaults setInteger:_page forKey:@"sp_touch_page"];
++    [NSUserDefaults.standardUserDefaults synchronize];
 +    [self sp_rebuild_items];
 +    [self sp_page_look];
 +    _sent = -1;   // a page change always tells the addon, even if it missed the last one
@@ -1562,6 +1571,7 @@
 +    } else {
 +        _user_on = !_user_on;
 +        [NSUserDefaults.standardUserDefaults setBool:_user_on forKey:@"sp_touch_on"];
++        [NSUserDefaults.standardUserDefaults synchronize];
 +    }
 +    [self sp_update_hidden];
 +}
@@ -1755,16 +1765,20 @@
 +    it[@"x"] = @((c.x - g.origin.x) / g.size.width);
 +    it[@"y"] = @((c.y - g.origin.y) / g.size.height);
 +    it[@"s"] = @(size);
-+    if (v == _stick) [d setObject:it forKey:@"sp_touch_stick"];
-+    else [self sp_save_pages];
++    if (v == _stick) {
++        [d setObject:it forKey:@"sp_touch_stick"];
++        [d synchronize];
++    } else {
++        [self sp_save_pages];
++    }
 +    [self setNeedsLayout];
 +}
 +
 +// Standard: this page's controls and the stick back to their default places and sizes.
 +- (void)sp_edit_reset {
 +    for (NSMutableDictionary *it in [self sp_items]) [it removeObjectsForKeys:@[ @"x", @"y", @"s" ]];
-+    [self sp_save_pages];
 +    [NSUserDefaults.standardUserDefaults setObject:@{ @"k" : @"stick" } forKey:@"sp_touch_stick"];
++    [self sp_save_pages];
 +    [self setNeedsLayout];
 +}
 +
@@ -2000,7 +2014,7 @@
 +#endif
 +
  // ---- the UIKit side: the scene's root view collects input
-@@ -710,2 +2701,8 @@
+@@ -710,2 +2715,8 @@
      [self addSubview:sp_cursor_view];
 +#if !TARGET_OS_VISION
 +    sp_touch_controls = [[SPTouchControls alloc] initWithFrame:self.bounds];
@@ -2009,7 +2023,7 @@
 +    [self addSubview:sp_touch_controls];
 +#endif
      if (!getenv("SP_CURSOR_SYSTEM")) [self addInteraction:[[UIPointerInteraction alloc] initWithDelegate:self]];
-@@ -750,2 +2747,3 @@
+@@ -750,2 +2761,3 @@
      if (![super pointInside:point withEvent:event]) return NO;
 +    if (sp_touch_controls_claim(self, point)) return YES;  // the touch controls' buttons in the strip
      return !sp_told_rect.size.width || CGRectContainsPoint(sp_game_rect(), point);
