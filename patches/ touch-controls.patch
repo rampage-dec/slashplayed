@@ -1,28 +1,18 @@
 --- a/shims/appkit/spevent.m
 +++ b/shims/appkit/spevent.m
-@@ -453,6 +453,9 @@
- @end
- 
+@@ -455,2 +455,5 @@
  static SPHoverLayer *sp_hover_layer;
 +#if !TARGET_OS_VISION
 +static UIView *sp_touch_controls;  // the stick and buttons, below (SPTouchControls)
 +#endif
  
- // spwindow.m's sp_window_track_scene, when it fits or moves the game rect: the highlights' rects are
- // fractions of the client's window, so their container covers the game rect, not the scene window;
-@@ -460,6 +463,9 @@
- static void sp_game_moved(CGRect game) {
-     sp_hover_layer.frame = game;
+@@ -462,2 +465,5 @@
      sp_cursor_update();
 +#if !TARGET_OS_VISION
 +    [sp_touch_controls setNeedsLayout];
 +#endif
  }
- 
- // rects: fractions of the window, origin bottom left.
-@@ -598,6 +604,348 @@
- #endif
- @end
+@@ -600,2 +606,344 @@
  
 +#if !TARGET_OS_VISION
 +// ---- touch controls (iPhone and iPad): a stick to walk, Jump, and an action button
@@ -367,11 +357,7 @@
 +#endif
 +
  // ---- the UIKit side: the scene's root view collects input
- 
- @interface SPInputView : UIView <UIPointerInteractionDelegate>
-@@ -708,6 +1056,12 @@
-     sp_cursor_view.hidden = YES;
-     sp_cursor_view.layer.zPosition = 2000;
+@@ -710,2 +1058,8 @@
      [self addSubview:sp_cursor_view];
 +#if !TARGET_OS_VISION
 +    sp_touch_controls = [[SPTouchControls alloc] initWithFrame:self.bounds];
@@ -380,5 +366,3 @@
 +    [self addSubview:sp_touch_controls];
 +#endif
      if (!getenv("SP_CURSOR_SYSTEM")) [self addInteraction:[[UIPointerInteraction alloc] initWithDelegate:self]];
-     [NSNotificationCenter.defaultCenter addObserverForName:UIPointerLockStateDidChangeNotification object:nil queue:nil
-                                  
