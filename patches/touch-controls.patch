@@ -3,7 +3,7 @@
 @@ -455,2 +455,5 @@
  static SPHoverLayer *sp_hover_layer;
 +#if !TARGET_OS_VISION
-+static UIView *sp_touch_controls;  // the stick and buttons, below (SPTouchControls)
++static UIView *sp_touch_controls;  // the stick, the buttons, and the keyboard, below (SPTouchControls)
 +#endif
  
 @@ -462,2 +465,5 @@
@@ -12,30 +12,81 @@
 +    [sp_touch_controls setNeedsLayout];
 +#endif
  }
-@@ -600,2 +606,298 @@
+@@ -600,2 +606,1061 @@
  
 +#if !TARGET_OS_VISION
-+// ---- touch controls (iPhone and iPad): a stick to walk, Jump, and an action button
++// ---- touch controls (iPhone and iPad): a stick to walk, a camera pad, buttons, and a keyboard
 +//
 +// For playing with neither a keyboard nor a game controller. Addons can't move the character (the
 +// game's movement functions are protected), so the stick lives here and presses W, A, S and D (walk
-+// forward, turn left, walk back, turn right) as a keyboard would, through the same event queue sp_key
-+// fills.
++// forward, turn left, walk back, turn right; or Q and E, strafing, for left and right) as a keyboard
++// would, through the same event queue sp_key fills.
 +//
 +// The buttons press keys: Jump is Space; Interact F11, Fishing F12 and Auto Run F10, which the SPTouch
 +// addon binds with priority (interact with the soft target; cast Fishing, then land the catch; toggle
-+// autorun). Without the addon those keys are the game's own (bags). Not F13: on a Mac that is Print
-+// Screen, which the game names PRINTSCREEN and takes a screenshot with. Two-finger drags beside the
-+// controls still turn the camera, as before, since these views take only their own touches.
++// autorun), and F9 (open the chat) when the keyboard opens. Without the addon those keys are the game's
++// own. Not F13: on a Mac that is Print Screen, which the game names PRINTSCREEN and takes a screenshot
++// with. The camera pad is a right-button drag, as a two-finger drag is (sp_chord_resolve), which turns
++// the character and the camera; a tap on it is a left click where it landed.
 +//
-+// Hidden while a game controller or a hardware keyboard is connected (those have their own keys), and
-+// off altogether with SP_TOUCH_CONTROLS=0 or NSUserDefaults "sp_touch_controls" = NO.
++// Four buttons sit in the strip beside the game (an iPhone's Dynamic Island side), always there: Touch
++// shows and hides the rest (hidden by itself while a game controller or a hardware keyboard is
++// connected), the gear opens the settings (sizes, the stick's sideways keys, the camera pad's speed,
++// opacity, vibration; NSUserDefaults "sp_touch_*"), Esc is Escape, and the keyboard button opens the
++// system keyboard, whose text goes to the game as key presses. Off altogether with SP_TOUCH_CONTROLS=0
++// or NSUserDefaults "sp_touch_controls" = NO.
 +
 +static BOOL sp_touch_controls_wanted(void) {
 +    const char *env = getenv("SP_TOUCH_CONTROLS");
 +    if (env) return atoi(env) != 0;
 +    id v = [NSUserDefaults.standardUserDefaults objectForKey:@"sp_touch_controls"];
 +    return v ? [v boolValue] : YES;
++}
++
++// ---- settings: the panel's rows, in order, and what each is saved as
++
++enum { SP_TS_STICK, SP_TS_BUTTONS, SP_TS_SIDE, SP_TS_CENTER, SP_TS_LOOK, SP_TS_OPACITY, SP_TS_HAPTICS, SP_TS_COUNT };
++
++static const struct {
++    const char *key, *title;
++    const char *choices[4];
++    int count, def;
++} sp_ts_rows[SP_TS_COUNT] = {
++    { "sp_touch_stick_size", "Joystick-Größe", { "Klein", "Mittel", "Groß" }, 3, 1 },
++    { "sp_touch_button_size", "Tasten-Größe", { "Klein", "Mittel", "Groß" }, 3, 1 },
++    { "sp_touch_stick_side", "Joystick seitlich", { "Drehen", "Seitwärts" }, 2, 0 },
++    { "sp_touch_stick_center", "Joystick-Mitte", { "Fest", "Am Daumen" }, 2, 1 },
++    { "sp_touch_look", "Kamera-Feld", { "Aus", "Langsam", "Mittel", "Schnell" }, 4, 2 },
++    { "sp_touch_opacity", "Deckkraft", { "Schwach", "Mittel", "Voll" }, 3, 2 },
++    { "sp_touch_haptics", "Vibration", { "Aus", "An" }, 2, 1 },
++};
++
++static int sp_ts[SP_TS_COUNT];
++
++static void sp_ts_load(void) {
++    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
++    for (int i = 0; i < SP_TS_COUNT; i++) {
++        id v = [d objectForKey:@(sp_ts_rows[i].key)];
++        int n = v ? (int)[v integerValue] : sp_ts_rows[i].def;
++        sp_ts[i] = n >= 0 && n < sp_ts_rows[i].count ? n : sp_ts_rows[i].def;
++    }
++}
++
++static void sp_ts_set(int row, int value) {
++    sp_ts[row] = value;
++    [NSUserDefaults.standardUserDefaults setInteger:value forKey:@(sp_ts_rows[row].key)];
++}
++
++static const CGFloat sp_ts_size[3] = { 0.8, 1.0, 1.2 };
++static const CGFloat sp_ts_look_speed[4] = { 0, 1.0, 1.7, 2.6 };
++static const CGFloat sp_ts_alpha[3] = { 0.45, 0.72, 1.0 };
++
++// A light tap in the hand on a press, when vibration is on.
++static void sp_touch_haptic(void) {
++    if (!sp_ts[SP_TS_HAPTICS]) return;
++    static UIImpactFeedbackGenerator *g;
++    if (!g) g = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
++    [g impactOccurred];
 +}
 +
 +// A key press with no UIKey behind it: the Mac key code and the characters it types.
@@ -52,21 +103,54 @@
 +    sp_post(e);
 +}
 +
-+// W, A, S, D as Mac key codes (kVK_ANSI_W, _A, _S, _D) and what they type: the game's walk forward,
-+// turn left, walk back and turn right. Turning by key, not by a right-button drag: a synthetic
-+// mouselook press was taken as a right click on whatever stood there (talking to NPCs) and didn't
-+// turn. For a fast turn, a two-finger drag beside the controls turns the camera and the character.
-+static const unsigned short sp_stick_mac[4] = { 0x0D, 0x00, 0x01, 0x02 };
-+static NSString *const sp_stick_chars[4] = { @"w", @"a", @"s", @"d" };
++static void sp_virtual_tap(unsigned short mac, NSString *chars) {
++    sp_virtual_key(mac, chars, YES);
++    sp_virtual_key(mac, chars, NO);
++}
++
++// A view as large as its superview that takes no touch itself: everything outside its subviews goes
++// to the view underneath (the root view, the game).
++@interface SPPassView : UIView
++@end
++
++@implementation SPPassView
++- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
++    UIView *v = [super hitTest:point withEvent:event];
++    return v == self ? nil : v;
++}
++@end
++
++// ---- the stick
++
++// Forward, left, back, right: the keys (Mac key codes, kVK_ANSI_*) and what they type. Left and right
++// turn (A, D) or strafe (Q, E), the setting's choice. Turning by key, not by a right-button drag: the
++// stick's own mouselook press was taken as a right click on whatever stood there. The camera pad turns
++// by drag, from a touch of its own.
++static void sp_stick_key(int i, BOOL strafe, unsigned short *mac, NSString **chars) {
++    static const unsigned short turn[4] = { 0x0D, 0x00, 0x01, 0x02 }, side[4] = { 0x0D, 0x0C, 0x01, 0x0E };
++    static NSString *const turn_c[4] = { @"w", @"a", @"s", @"d" }, *const side_c[4] = { @"w", @"q", @"s", @"e" };
++    *mac = strafe ? side[i] : turn[i];
++    *chars = strafe ? side_c[i] : turn_c[i];
++}
++
++// Each key's direction (degrees, 0 right, counterclockwise, up 90) and half its sector. Forward and
++// back get 140 degrees, left and right 120: straight ahead and straight back have 60 to themselves,
++// left and right 40, and each diagonal (both keys) 40. A key held keeps its sector 7 degrees wider,
++// so a thumb resting on a boundary doesn't flick the key on and off.
++static const CGFloat sp_stick_dir[4] = { 90, 180, 270, 0 }, sp_stick_half[4] = { 70, 60, 70, 60 };
 +
 +@interface SPStickView : UIView
++@property(nonatomic) CGPoint rest;   // the centre at rest, in the superview's coordinates
 +- (void)sp_release;
 +@end
 +
 +@implementation SPStickView {
 +    UITouch *_touch;   // the thumb on the stick; nil when free
 +    UIView *_knob;
-+    BOOL _down[4];     // W A S D, as last pressed
++    UILabel *_arrow[4];
++    BOOL _down[4];
++    unsigned short _mac[4];   // the key each pressed, so its release is the same key after a mode change
++    NSString *_chars[4];
 +}
 +
 +- (instancetype)initWithFrame:(CGRect)frame {
@@ -74,6 +158,15 @@
 +    self.backgroundColor = [UIColor colorWithWhite:1 alpha:0.10];
 +    self.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.35].CGColor;
 +    self.layer.borderWidth = 1.5;
++    static NSString *const arrows[4] = { @"▲", @"◀", @"▼", @"▶" };
++    for (int i = 0; i < 4; i++) {
++        _arrow[i] = [[UILabel alloc] init];
++        _arrow[i].text = arrows[i];
++        _arrow[i].textAlignment = NSTextAlignmentCenter;
++        _arrow[i].textColor = [UIColor colorWithWhite:1 alpha:0.35];
++        _arrow[i].userInteractionEnabled = NO;
++        [self addSubview:_arrow[i]];
++    }
 +    _knob = [[UIView alloc] init];
 +    _knob.userInteractionEnabled = NO;
 +    _knob.backgroundColor = [UIColor colorWithWhite:1 alpha:0.35];
@@ -81,66 +174,102 @@
 +    return self;
 +}
 +
++- (CGFloat)sp_r {
++    return self.bounds.size.width / 2;
++}
++
++// A new rest point (a layout) moves a stick that's free; a held one goes back there on release.
++- (void)setRest:(CGPoint)rest {
++    _rest = rest;
++    if (!_touch) self.center = rest;
++}
++
 +- (void)layoutSubviews {
 +    [super layoutSubviews];
-+    CGFloat r = self.bounds.size.width / 2, k = r * 0.8;
++    CGFloat r = [self sp_r], k = r * 0.8;
 +    self.layer.cornerRadius = r;
 +    _knob.bounds = CGRectMake(0, 0, k, k);
 +    _knob.layer.cornerRadius = k / 2;
 +    if (!_touch) _knob.center = CGPointMake(r, r);
++    CGFloat a = MAX(10, r * 0.22);
++    for (int i = 0; i < 4; i++) {
++        _arrow[i].font = [UIFont boldSystemFontOfSize:a];
++        _arrow[i].bounds = CGRectMake(0, 0, a * 1.6, a * 1.6);
++        CGFloat rad = sp_stick_dir[i] * M_PI / 180;
++        _arrow[i].center = CGPointMake(r + cos(rad) * r * 0.78, r - sin(rad) * r * 0.78);
++    }
 +}
 +
-+// A catch area wider than the ring, so a thumb landing a little outside still takes the stick.
++// A catch area wider than the ring, so a thumb landing a little outside still takes the stick; wider
++// still when the centre goes to the thumb.
 +- (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent *)event {
-+    CGFloat r = self.bounds.size.width / 2;
-+    return hypot(p.x - r, p.y - r) <= r * 1.35;
++    CGFloat r = [self sp_r];
++    return hypot(p.x - r, p.y - r) <= r * (sp_ts[SP_TS_CENTER] ? 1.45 : 1.3);
 +}
 +
 +- (void)sp_key:(int)i down:(BOOL)down {
 +    if (_down[i] == down) return;
++    if (down) {
++        NSString *chars;
++        sp_stick_key(i, sp_ts[SP_TS_SIDE] == 1, &_mac[i], &chars);
++        _chars[i] = chars;
++    }
 +    _down[i] = down;
-+    sp_virtual_key(sp_stick_mac[i], sp_stick_chars[i], down);
++    sp_virtual_key(_mac[i], _chars[i], down);
++    _arrow[i].textColor = [UIColor colorWithWhite:1 alpha:down ? 0.95 : 0.35];
 +}
 +
-+// Eight directions by angle, so a diagonal walks and turns at once and a sideways push only turns.
-+// Within a fifth of the radius nothing is pressed (a resting thumb).
++// p is in the superview's coordinates. Moves the centre to within 0.9 radius of the rest point.
++- (void)sp_center_toward:(CGPoint)c {
++    CGFloat r = [self sp_r], ox = c.x - _rest.x, oy = c.y - _rest.y, ol = hypot(ox, oy), max = r * 0.9;
++    if (ol > max) c = CGPointMake(_rest.x + ox * max / ol, _rest.y + oy * max / ol);
++    self.center = c;
++}
++
 +- (void)sp_follow:(CGPoint)p {
-+    CGFloat r = self.bounds.size.width / 2;
++    CGFloat r = [self sp_r];
 +    if (r <= 0) return;
-+    CGFloat dx = (p.x - r) / r, dy = (p.y - r) / r, len = hypot(dx, dy);
-+    if (len > 1) { dx /= len; dy /= len; len = 1; }
-+    _knob.center = CGPointMake(r + dx * r * 0.6, r + dy * r * 0.6);
-+    BOOL w = NO, a = NO, s = NO, d = NO;
-+    if (len >= 0.2) {
-+        // 0 = right, counterclockwise, screen y down: up is 90 degrees.
-+        CGFloat deg = atan2(-dy, dx) * 180 / M_PI;
-+        if (deg < 0) deg += 360;
-+        w = deg > 22.5 && deg < 157.5;
-+        a = deg > 112.5 && deg < 247.5;
-+        s = deg > 202.5 && deg < 337.5;
-+        d = deg > 292.5 || deg < 67.5;
++    CGPoint c = self.center;
++    CGFloat dx = (p.x - c.x) / r, dy = (p.y - c.y) / r, len = hypot(dx, dy);
++    // With the centre at the thumb, a thumb past the ring drags the ring along (so turning back is a
++    // short way, not across a far-off centre), within its bounds near the rest point.
++    if (sp_ts[SP_TS_CENTER] && len > 1) {
++        [self sp_center_toward:CGPointMake(p.x - dx / len * r, p.y - dy / len * r)];
++        c = self.center;
++        dx = (p.x - c.x) / r;
++        dy = (p.y - c.y) / r;
++        len = hypot(dx, dy);
 +    }
-+    [self sp_key:0 down:w];
-+    [self sp_key:1 down:a];
-+    [self sp_key:2 down:s];
-+    [self sp_key:3 down:d];
++    if (len > 1) { dx /= len; dy /= len; len = 1; }
++    _knob.center = CGPointMake(r + dx * r * 0.62, r + dy * r * 0.62);
++    BOOL engaged = _down[0] || _down[1] || _down[2] || _down[3];
++    BOOL active = len >= (engaged ? 0.14 : 0.2);   // a resting thumb presses nothing
++    CGFloat deg = atan2(-dy, dx) * 180 / M_PI;     // screen y grows down
++    for (int i = 0; i < 4; i++) {
++        CGFloat off = fabs(remainder(deg - sp_stick_dir[i], 360));
++        [self sp_key:i down:active && off < sp_stick_half[i] + (_down[i] ? 7 : 0)];
++    }
 +}
 +
 +- (void)sp_release {
 +    for (int i = 0; i < 4; i++) [self sp_key:i down:NO];
 +    _touch = nil;
-+    CGFloat r = self.bounds.size.width / 2;
++    self.center = _rest;
++    CGFloat r = [self sp_r];
 +    _knob.center = CGPointMake(r, r);
 +}
 +
 +- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
 +    if (_touch) return;
 +    _touch = touches.anyObject;
-+    [self sp_follow:[_touch locationInView:self]];
++    CGPoint p = [_touch locationInView:self.superview];
++    // The centre where the thumb landed, so the first touch presses nothing (unless it landed far out).
++    if (sp_ts[SP_TS_CENTER]) [self sp_center_toward:p];
++    [self sp_follow:p];
 +}
 +
 +- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-+    if (_touch && [touches containsObject:_touch]) [self sp_follow:[_touch locationInView:self]];
++    if (_touch && [touches containsObject:_touch]) [self sp_follow:[_touch locationInView:self.superview]];
 +}
 +
 +- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
@@ -151,6 +280,98 @@
 +    [self touchesEnded:touches withEvent:event];
 +}
 +@end
++
++// ---- the camera pad: a one-finger right-button drag
++
++@interface SPLookPad : UIView
++- (void)sp_release;
++@end
++
++@implementation SPLookPad {
++    UITouch *_touch;
++    CGPoint _start, _last, _virt;   // UIKit points in the root view; _virt is the mouse, scaled
++    BOOL _pressed;
++    UILabel *_label;
++}
++
++- (instancetype)initWithFrame:(CGRect)frame {
++    if (!(self = [super initWithFrame:frame])) return nil;
++    self.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
++    self.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.28].CGColor;
++    self.layer.borderWidth = 1.5;
++    _label = [[UILabel alloc] init];
++    _label.text = @"Kamera\n◀ wischen ▶";
++    _label.numberOfLines = 2;
++    _label.textAlignment = NSTextAlignmentCenter;
++    _label.textColor = [UIColor colorWithWhite:1 alpha:0.5];
++    _label.font = [UIFont boldSystemFontOfSize:12];
++    _label.userInteractionEnabled = NO;
++    [self addSubview:_label];
++    return self;
++}
++
++- (void)layoutSubviews {
++    [super layoutSubviews];
++    self.layer.cornerRadius = MIN(18, self.bounds.size.height / 4);
++    _label.frame = self.bounds;
++}
++
++- (CGPoint)sp_at:(UITouch *)t {
++    return [t locationInView:sp_touch_controls.superview];
++}
++
++- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
++    if (_touch) return;
++    _touch = touches.anyObject;
++    _start = _last = _virt = [self sp_at:_touch];
++    _pressed = NO;
++    self.backgroundColor = [UIColor colorWithWhite:1 alpha:0.16];
++}
++
++// The press waits until the finger has moved, so a resting finger right-clicks nothing; then down where
++// it landed and a drag from there, as sp_chord_resolve does for two fingers. Vertical moves count for
++// less than across: a sideways swipe mostly turns, and tilts the camera only a little.
++- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
++    if (!_touch || ![touches containsObject:_touch]) return;
++    CGPoint p = [self sp_at:_touch];
++    if (!_pressed) {
++        if (hypot(p.x - _start.x, p.y - _start.y) < 7) return;
++        _pressed = YES;
++        sp_mouse_button(1, YES, sp_from_uikit(_start));
++    }
++    CGFloat speed = sp_ts_look_speed[sp_ts[SP_TS_LOOK]];
++    _virt.x += (p.x - _last.x) * speed;
++    _virt.y += (p.y - _last.y) * speed * 0.7;
++    _last = p;
++    CGPoint m = sp_from_uikit(_virt);
++    if (m.x != sp_pointer.x || m.y != sp_pointer.y) sp_mouse_moved_to(m, sp_motion_type(), NO);
++}
++
++- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
++    if (!_touch || ![touches containsObject:_touch]) return;
++    if (!_pressed) {
++        // A tap: a left click where it landed (select what's there), as a tap anywhere else is.
++        CGPoint m = sp_from_uikit(_start);
++        sp_mouse_button(0, YES, m);
++        sp_mouse_button(0, NO, m);
++    }
++    [self sp_release];
++}
++
++- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
++    if (_touch && [touches containsObject:_touch]) [self sp_release];
++}
++
++// The release where the mouse is: anywhere else would move it first, mid-mouselook a jump.
++- (void)sp_release {
++    if (_pressed) sp_mouse_button(1, NO, sp_pointer);
++    _pressed = NO;
++    _touch = nil;
++    self.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
++}
++@end
++
++// ---- buttons
 +
 +// A round button holding one key down while touched.
 +@interface SPPadButton : UIView
@@ -189,7 +410,7 @@
 +    [super layoutSubviews];
 +    CGFloat d = self.bounds.size.width;
 +    self.layer.cornerRadius = d / 2;
-+    _label.font = [UIFont boldSystemFontOfSize:MAX(12, d * 0.17)];
++    _label.font = [UIFont boldSystemFontOfSize:MAX(11, d * 0.17)];
 +    _label.frame = CGRectInset(self.bounds, d * 0.1, d * 0.1);
 +}
 +
@@ -202,6 +423,7 @@
 +    if (_touch) return;
 +    _touch = touches.anyObject;
 +    self.backgroundColor = [UIColor colorWithWhite:1 alpha:0.35];
++    sp_touch_haptic();
 +    sp_virtual_key(_mac, _chars, YES);
 +}
 +
@@ -221,97 +443,638 @@
 +}
 +@end
 +
-+// The controls' container: as large as the root view, but it takes no touch itself, so everything
-+// outside the stick and the buttons goes to the root view underneath, as before.
-+@interface SPTouchControls : UIView
++// A button in the strip beside the game: a tap, and optionally a hold (half a second).
++@interface SPStripButton : UIView
++- (instancetype)initWithTitle:(NSString *)title symbol:(NSString *)symbol;
++@property(nonatomic, copy) void (^tap)(void);
++@property(nonatomic, copy) void (^hold)(void);
++@property(nonatomic) BOOL on;   // drawn lit
 +@end
 +
-+@implementation SPTouchControls {
-+    SPStickView *_stick;
-+    SPPadButton *_interact, *_fish, *_jump, *_autorun;
++@implementation SPStripButton {
++    UITouch *_touch;
++    UILabel *_label;
++    UIImageView *_image;
++    NSUInteger _gen;   // bumped per touch, so a stale hold timer does nothing
++    BOOL _held;
++}
++
++- (instancetype)initWithTitle:(NSString *)title symbol:(NSString *)symbol {
++    if (!(self = [super initWithFrame:CGRectZero])) return nil;
++    self.layer.borderWidth = 1;
++    self.layer.cornerRadius = 10;
++    UIImage *img = symbol ? [UIImage systemImageNamed:symbol withConfiguration:
++                             [UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightSemibold]] : nil;
++    if (img) {
++        _image = [[UIImageView alloc] initWithImage:img];
++        _image.contentMode = UIViewContentModeCenter;
++        _image.userInteractionEnabled = NO;
++        [self addSubview:_image];
++    } else {
++        _label = [[UILabel alloc] init];
++        _label.text = title;
++        _label.font = [UIFont boldSystemFontOfSize:12];
++        _label.textAlignment = NSTextAlignmentCenter;
++        _label.adjustsFontSizeToFitWidth = YES;
++        _label.minimumScaleFactor = 0.7;
++        _label.userInteractionEnabled = NO;
++        [self addSubview:_label];
++    }
++    [self sp_draw:NO];
++    return self;
++}
++
++- (void)setOn:(BOOL)on {
++    _on = on;
++    [self sp_draw:_touch != nil];
++}
++
++- (void)sp_draw:(BOOL)pressed {
++    CGFloat bg = pressed ? 0.45 : _on ? 0.28 : 0.10;
++    self.backgroundColor = [UIColor colorWithWhite:1 alpha:bg];
++    self.layer.borderColor = [UIColor colorWithWhite:1 alpha:_on ? 0.6 : 0.3].CGColor;
++    UIColor *fg = [UIColor colorWithWhite:1 alpha:_on || pressed ? 1 : 0.6];
++    _label.textColor = fg;
++    _image.tintColor = fg;
++}
++
++- (void)layoutSubviews {
++    [super layoutSubviews];
++    _label.frame = CGRectInset(self.bounds, 3, 2);
++    _image.frame = self.bounds;
++}
++
++- (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent *)event {
++    return CGRectContainsPoint(CGRectInset(self.bounds, -8, -8), p);
++}
++
++- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
++    if (_touch) return;
++    _touch = touches.anyObject;
++    _held = NO;
++    NSUInteger gen = ++_gen;
++    [self sp_draw:YES];
++    if (!_hold) return;
++    __weak SPStripButton *weak = self;
++    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
++        SPStripButton *me = weak;
++        if (!me || me->_gen != gen || !me->_touch) return;
++        me->_held = YES;
++        sp_touch_haptic();
++        me.hold();
++    });
++}
++
++- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
++    if (!_touch || ![touches containsObject:_touch]) return;
++    BOOL inside = [self pointInside:[_touch locationInView:self] withEvent:event];
++    _touch = nil;
++    _gen++;
++    [self sp_draw:NO];
++    if (inside && !_held && _tap) {
++        sp_touch_haptic();
++        _tap();
++    }
++}
++
++- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
++    if (!_touch || ![touches containsObject:_touch]) return;
++    _touch = nil;
++    _gen++;
++    [self sp_draw:NO];
++}
++@end
++
++// ---- the keyboard: the system's, its text sent as key presses
++
++// The Mac key code (US layout, kVK_ANSI_*) for a typed character, lowercase; the umlauts and ß at a
++// German keyboard's places. The game takes the text from the event's characters, so the code only
++// matters for a key binding (a letter typed with no chat box open is that letter's key). Anything
++// else goes as the ISO section key (0x0A), which nothing is bound to.
++static unsigned short sp_char_mac(unichar c) {
++    static const char *const ansi = "asdfhgzxcv\0bqweryt123465=97-80]ou[ip\0lj'k;\\,/nm.\0 `";
++    if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
++    switch (c) {
++    case 0xE4: case 0xC4: return 0x27;  // ä
++    case 0xF6: case 0xD6: return 0x29;  // ö
++    case 0xFC: case 0xDC: return 0x21;  // ü
++    case 0xDF: return 0x1B;             // ß
++    }
++    if (c && c < 128)
++        for (unsigned short i = 0; i <= 0x32; i++)
++            if ((unsigned char)ansi[i] == c) return i;
++    return 0x0A;
++}
++
++@interface SPKeyboardSink : UIView <UIKeyInput>
++@property(nonatomic, copy) void (^changed)(BOOL open);
++- (void)sp_open:(BOOL)chat;
++- (void)sp_close;
++@end
++
++// The bar over the keyboard: Esc, Chat and Tab on the left, what was typed (the game's own box is
++// usually under the keyboard), Fertig on the right.
++@interface SPKeyBar : UIView
++@property(nonatomic, strong) NSArray<UIView *> *left;
++@property(nonatomic, strong) UILabel *preview;
++@property(nonatomic, strong) UIView *right;
++@end
++
++@implementation SPKeyBar
++- (void)layoutSubviews {
++    [super layoutSubviews];
++    UIEdgeInsets s = self.safeAreaInsets;
++    CGRect b = self.bounds;
++    CGFloat x = b.origin.x + s.left + 8, h = b.size.height, end = CGRectGetMaxX(b) - s.right - 8;
++    for (UIView *v in _left) {
++        v.frame = CGRectMake(x, 5, 58, h - 10);
++        x += 64;
++    }
++    _right.frame = CGRectMake(end - 80, 5, 80, h - 10);
++    _preview.frame = CGRectMake(x + 6, 0, MAX(0, end - 86 - x - 6), h);
++}
++@end
++
++@implementation SPKeyboardSink {
++    SPKeyBar *_bar;
++    NSMutableString *_typed;   // what was typed since the last Return or Esc, for the bar
 +}
 +
 +- (instancetype)initWithFrame:(CGRect)frame {
 +    if (!(self = [super initWithFrame:frame])) return nil;
++    self.userInteractionEnabled = NO;
++    self.backgroundColor = UIColor.clearColor;
++    _typed = [NSMutableString string];
++    _bar = [[SPKeyBar alloc] initWithFrame:CGRectMake(0, 0, 320, 44)];
++    _bar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
++    _bar.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.96];
++    NSMutableArray *left = [NSMutableArray array];
++    for (NSString *t in @[ @"Esc", @"Chat", @"Tab" ]) {
++        UIButton *b = [self sp_button:t];
++        [left addObject:b];
++        [_bar addSubview:b];
++    }
++    [(UIButton *)left[0] addTarget:self action:@selector(sp_escape) forControlEvents:UIControlEventTouchUpInside];
++    [(UIButton *)left[1] addTarget:self action:@selector(sp_chat) forControlEvents:UIControlEventTouchUpInside];
++    [(UIButton *)left[2] addTarget:self action:@selector(sp_tab) forControlEvents:UIControlEventTouchUpInside];
++    _bar.left = left;
++    UIButton *done = [self sp_button:@"Fertig"];
++    [done addTarget:self action:@selector(sp_close) forControlEvents:UIControlEventTouchUpInside];
++    _bar.right = done;
++    [_bar addSubview:done];
++    _bar.preview = [[UILabel alloc] init];
++    _bar.preview.font = [UIFont systemFontOfSize:15];
++    _bar.preview.lineBreakMode = NSLineBreakByTruncatingHead;
++    [_bar addSubview:_bar.preview];
++    [self sp_show_typed];
++    return self;
++}
++
++- (UIButton *)sp_button:(NSString *)title {
++    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
++    [b setTitle:title forState:UIControlStateNormal];
++    b.titleLabel.font = [UIFont boldSystemFontOfSize:15];
++    b.tintColor = UIColor.whiteColor;
++    b.backgroundColor = [UIColor colorWithWhite:1 alpha:0.12];
++    b.layer.cornerRadius = 8;
++    return b;
++}
++
++- (void)sp_show_typed {
++    BOOL empty = !_typed.length;
++    _bar.preview.text = empty ? @"Schreiben … (Enter sendet)" : _typed;
++    _bar.preview.textColor = [UIColor colorWithWhite:1 alpha:empty ? 0.45 : 0.95];
++}
++
++- (UIView *)inputAccessoryView {
++    return _bar;
++}
++
++- (BOOL)canBecomeFirstResponder {
++    return YES;
++}
++
++// The system keyboard as a plain one: no corrections, capitals, or smart punctuation, which would
++// change text the game has already been sent.
++- (UITextAutocorrectionType)autocorrectionType { return UITextAutocorrectionTypeNo; }
++- (UITextAutocapitalizationType)autocapitalizationType { return UITextAutocapitalizationTypeNone; }
++- (UITextSpellCheckingType)spellCheckingType { return UITextSpellCheckingTypeNo; }
++- (UITextSmartQuotesType)smartQuotesType { return UITextSmartQuotesTypeNo; }
++- (UITextSmartDashesType)smartDashesType { return UITextSmartDashesTypeNo; }
++- (UITextSmartInsertDeleteType)smartInsertDeleteType { return UITextSmartInsertDeleteTypeNo; }
++- (UIKeyboardAppearance)keyboardAppearance { return UIKeyboardAppearanceDark; }
++- (UIReturnKeyType)returnKeyType { return UIReturnKeySend; }
++
++// Always: the game's box may hold text from before, which the delete key should still reach.
++- (BOOL)hasText {
++    return YES;
++}
++
++- (void)insertText:(NSString *)text {
++    [text enumerateSubstringsInRange:NSMakeRange(0, text.length) options:NSStringEnumerationByComposedCharacterSequences
++                          usingBlock:^(NSString *ch, NSRange r, NSRange er, BOOL *stop) {
++        if ([ch isEqualToString:@"\n"] || [ch isEqualToString:@"\r"]) {
++            [self sp_return];
++            return;
++        }
++        sp_virtual_tap(sp_char_mac([ch characterAtIndex:0]), ch);
++        [self->_typed appendString:ch];
++    }];
++    [self sp_show_typed];
++}
++
++- (void)deleteBackward {
++    sp_virtual_tap(0x33, nil);  // Delete: deleteBackward: in the game's box
++    if (_typed.length) {
++        NSRange last = [_typed rangeOfComposedCharacterSequenceAtIndex:_typed.length - 1];
++        [_typed deleteCharactersInRange:last];
++    }
++    [self sp_show_typed];
++}
++
++// Return sends what's typed (and closes the chat box); with something typed, the keyboard closes
++// too, back to the game. With nothing typed it's the game's Enter, which opens the chat.
++- (void)sp_return {
++    BOOL sent = _typed.length > 0;
++    sp_virtual_tap(0x24, nil);
++    [_typed setString:@""];
++    [self sp_show_typed];
++    if (sent) dispatch_async(dispatch_get_main_queue(), ^{ [self sp_close]; });
++}
++
++- (void)sp_escape {
++    sp_virtual_tap(0x35, nil);
++    [_typed setString:@""];
++    [self sp_show_typed];
++}
++
++// F9: SPTouch binds it to open the chat. Unlike Enter it does nothing in a text box that already has
++// the keyboard (the chat's, a search field's): the box takes the key, and a function key types nothing.
++- (void)sp_chat {
++    sp_virtual_tap(0x65, nil);
++}
++
++- (void)sp_tab {
++    sp_virtual_tap(0x30, nil);
++}
++
++- (void)sp_open:(BOOL)chat {
++    if (self.isFirstResponder) return;
++    [_typed setString:@""];
++    [self sp_show_typed];
++    if (![self becomeFirstResponder]) return;
++    if (chat) [self sp_chat];
++    if (_changed) _changed(YES);
++}
++
++// Back to the root view, which takes a hardware keyboard's keys as first responder.
++- (void)sp_close {
++    if (self.isFirstResponder) [self resignFirstResponder];
++    [self.superview.superview becomeFirstResponder];
++    if (_changed) _changed(NO);
++}
++@end
++
++// ---- the settings panel (the gear, or holding Touch)
++
++@interface SPSettingsPanel : UIView
++@property(nonatomic, copy) void (^changed)(void);
++@property(nonatomic, copy) void (^done)(void);
++@end
++
++@implementation SPSettingsPanel {
++    UILabel *_title;
++    NSMutableArray<UILabel *> *_labels;
++    NSMutableArray<UISegmentedControl *> *_segs;
++    UIButton *_reset, *_finish;
++}
++
++- (instancetype)initWithFrame:(CGRect)frame {
++    if (!(self = [super initWithFrame:frame])) return nil;
++    self.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
++    self.layer.cornerRadius = 14;
++    self.layer.borderWidth = 1;
++    self.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.25].CGColor;
++    _title = [[UILabel alloc] init];
++    _title.text = @"Touch-Steuerung";
++    _title.font = [UIFont boldSystemFontOfSize:16];
++    _title.textColor = UIColor.whiteColor;
++    [self addSubview:_title];
++    _labels = [NSMutableArray array];
++    _segs = [NSMutableArray array];
++    for (int i = 0; i < SP_TS_COUNT; i++) {
++        UILabel *l = [[UILabel alloc] init];
++        l.text = @(sp_ts_rows[i].title);
++        l.font = [UIFont systemFontOfSize:13];
++        l.textColor = [UIColor colorWithWhite:1 alpha:0.85];
++        l.adjustsFontSizeToFitWidth = YES;
++        l.minimumScaleFactor = 0.75;
++        [_labels addObject:l];
++        [self addSubview:l];
++        NSMutableArray *items = [NSMutableArray array];
++        for (int c = 0; c < sp_ts_rows[i].count; c++) [items addObject:@(sp_ts_rows[i].choices[c])];
++        UISegmentedControl *s = [[UISegmentedControl alloc] initWithItems:items];
++        s.tag = i;
++        [s addTarget:self action:@selector(sp_picked:) forControlEvents:UIControlEventValueChanged];
++        [_segs addObject:s];
++        [self addSubview:s];
++    }
++    _reset = [UIButton buttonWithType:UIButtonTypeSystem];
++    [_reset setTitle:@"Standard" forState:UIControlStateNormal];
++    [_reset addTarget:self action:@selector(sp_defaults) forControlEvents:UIControlEventTouchUpInside];
++    _finish = [UIButton buttonWithType:UIButtonTypeSystem];
++    [_finish setTitle:@"Fertig" forState:UIControlStateNormal];
++    _finish.titleLabel.font = [UIFont boldSystemFontOfSize:17];
++    [_finish addTarget:self action:@selector(sp_finished) forControlEvents:UIControlEventTouchUpInside];
++    [self addSubview:_reset];
++    [self addSubview:_finish];
++    [self sp_sync];
++    return self;
++}
++
++- (void)sp_sync {
++    for (int i = 0; i < SP_TS_COUNT; i++) _segs[i].selectedSegmentIndex = sp_ts[i];
++}
++
++- (void)sp_picked:(UISegmentedControl *)s {
++    sp_ts_set((int)s.tag, (int)s.selectedSegmentIndex);
++    if (_changed) _changed();
++}
++
++- (void)sp_defaults {
++    for (int i = 0; i < SP_TS_COUNT; i++) sp_ts_set(i, sp_ts_rows[i].def);
++    [self sp_sync];
++    if (_changed) _changed();
++}
++
++- (void)sp_finished {
++    if (_done) _done();
++}
++
++// Rows as tall as fit (36 points at most), the label column a third of the width.
++- (void)layoutSubviews {
++    [super layoutSubviews];
++    CGRect b = self.bounds;
++    CGFloat pad = 14, w = b.size.width - 2 * pad, head = 34, foot = 40;
++    CGFloat row = MIN(36, (b.size.height - head - foot - pad) / SP_TS_COUNT);
++    _title.frame = CGRectMake(pad, 6, w, head - 6);
++    CGFloat lw = w * 0.34;
++    for (int i = 0; i < SP_TS_COUNT; i++) {
++        CGFloat y = head + i * row;
++        _labels[i].frame = CGRectMake(pad, y, lw - 6, row);
++        _segs[i].frame = CGRectMake(pad + lw, y + 3, w - lw, row - 6);
++    }
++    CGFloat fy = head + SP_TS_COUNT * row + 2;
++    _reset.frame = CGRectMake(pad, fy, 100, foot - 4);
++    _finish.frame = CGRectMake(CGRectGetMaxX(b) - pad - 100, fy, 100, foot - 4);
++}
++@end
++
++// ---- the controls' container
++
++@interface SPTouchControls : SPPassView
++- (BOOL)sp_claims:(CGPoint)p;
++@end
++
++@implementation SPTouchControls {
++    SPPassView *_pad;   // the stick, the buttons, and the camera pad: what Touch shows and hides
++    SPStickView *_stick;
++    SPPadButton *_interact, *_fish, *_jump, *_autorun;
++    SPLookPad *_look;
++    SPStripButton *_toggle, *_gear, *_esc, *_kbd;
++    SPKeyboardSink *_sink;
++    SPSettingsPanel *_panel;
++    BOOL _user_on;        // Touch on with no controller or keyboard connected (saved: sp_touch_on)
++    BOOL _on_with_device; // Touch on while one is (not saved: each connection starts with it off)
++}
++
++- (instancetype)initWithFrame:(CGRect)frame {
++    if (!(self = [super initWithFrame:frame])) return nil;
++    sp_ts_load();
++    id on = [NSUserDefaults.standardUserDefaults objectForKey:@"sp_touch_on"];
++    _user_on = on ? [on boolValue] : YES;
 +    self.backgroundColor = UIColor.clearColor;
 +    self.multipleTouchEnabled = YES;
++    _pad = [[SPPassView alloc] initWithFrame:self.bounds];
++    _pad.multipleTouchEnabled = YES;
++    [self addSubview:_pad];
++    _look = [[SPLookPad alloc] initWithFrame:CGRectZero];
 +    _stick = [[SPStickView alloc] initWithFrame:CGRectZero];
 +    _interact = [[SPPadButton alloc] initWithTitle:@"Inter-\nagieren" mac:0x67 chars:nil];  // F11
 +    _fish = [[SPPadButton alloc] initWithTitle:@"Angeln" mac:0x6F chars:nil];               // F12
 +    _jump = [[SPPadButton alloc] initWithTitle:@"Springen" mac:0x31 chars:@" "];            // Space
 +    _autorun = [[SPPadButton alloc] initWithTitle:@"Auto-\nLauf" mac:0x6D chars:nil];        // F10
-+    for (UIView *v in @[ _stick, _interact, _fish, _jump, _autorun ]) [self addSubview:v];
++    for (UIView *v in @[ _look, _stick, _interact, _fish, _jump, _autorun ]) [_pad addSubview:v];
++
 +    __weak SPTouchControls *weak = self;
-+    void (^update)(NSNotification *) = ^(NSNotification *n) { [weak sp_update_hidden]; };
++    _toggle = [[SPStripButton alloc] initWithTitle:@"Touch" symbol:nil];
++    _toggle.tap = ^{ [weak sp_toggle]; };
++    _toggle.hold = ^{ [weak sp_settings]; };
++    _gear = [[SPStripButton alloc] initWithTitle:@"⚙︎" symbol:@"gearshape"];
++    _gear.tap = ^{ [weak sp_settings]; };
++    _esc = [[SPStripButton alloc] initWithTitle:@"Esc" symbol:nil];
++    _esc.tap = ^{ sp_virtual_tap(0x35, nil); };
++    _kbd = [[SPStripButton alloc] initWithTitle:@"Tast." symbol:@"keyboard"];
++    _kbd.tap = ^{ [weak sp_keyboard:YES]; };
++    _kbd.hold = ^{ [weak sp_keyboard:NO]; };   // the keyboard alone, for a text box already tapped
++    for (UIView *v in @[ _toggle, _gear, _esc, _kbd ]) [self addSubview:v];
++    _sink = [[SPKeyboardSink alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
++    _sink.changed = ^(BOOL open) { [weak sp_keyboard_changed:open]; };
++    [self addSubview:_sink];
++
++    void (^devices)(NSNotification *) = ^(NSNotification *n) { [weak sp_devices_changed]; };
 +    for (NSNotificationName name in @[ GCControllerDidConnectNotification, GCControllerDidDisconnectNotification,
 +                                       GCKeyboardDidConnectNotification, GCKeyboardDidDisconnectNotification ])
 +        [NSNotificationCenter.defaultCenter addObserverForName:name object:nil queue:NSOperationQueue.mainQueue
-+                                                    usingBlock:update];
++                                                    usingBlock:devices];
 +    // Leaving the app mid-walk lifts every key, so the character doesn't keep running.
 +    [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationWillResignActiveNotification object:nil
 +                                                     queue:NSOperationQueue.mainQueue
 +                                                usingBlock:^(NSNotification *n) { [weak sp_release_all]; }];
++    // The keyboard can go without Fertig (an iPad's hide key): the root view takes the keys again.
++    [NSNotificationCenter.defaultCenter addObserverForName:UIKeyboardDidHideNotification object:nil
++                                                     queue:NSOperationQueue.mainQueue
++                                                usingBlock:^(NSNotification *n) { [weak sp_keyboard_hidden]; }];
++    [self sp_apply_settings];
 +    [self sp_update_hidden];
 +    return self;
 +}
 +
-+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-+    UIView *v = [super hitTest:point withEvent:event];
-+    return v == self ? nil : v;
-+}
-+
 +- (void)sp_release_all {
 +    [_stick sp_release];
++    [_look sp_release];
 +    for (SPPadButton *b in @[ _interact, _fish, _jump, _autorun ]) [b sp_release];
 +}
 +
-+- (void)sp_update_hidden {
-+    BOOL pad = GCController.controllers.count > 0;
-+    BOOL keyboard = GCKeyboard.coalescedKeyboard != nil;
-+    BOOL hide = pad || keyboard || !sp_touch_controls_wanted();
-+    if (hide && !self.hidden) [self sp_release_all];
-+    if (hide != self.hidden) {
-+        sp_stub_log([NSString stringWithFormat:@"touch controls: %s (controller %d, keyboard %d)",
-+                     hide ? "hidden" : "shown", pad, keyboard].UTF8String);
++- (BOOL)sp_device {
++    return GCController.controllers.count > 0 || GCKeyboard.coalescedKeyboard != nil;
++}
++
++- (void)sp_devices_changed {
++    _on_with_device = NO;
++    [self sp_update_hidden];
++}
++
++- (void)sp_toggle {
++    if ([self sp_device]) {
++        _on_with_device = !_on_with_device;
++    } else {
++        _user_on = !_user_on;
++        [NSUserDefaults.standardUserDefaults setBool:_user_on forKey:@"sp_touch_on"];
 +    }
-+    self.hidden = hide;
++    [self sp_update_hidden];
++}
++
++// Shown while the settings are open too, to see what they change.
++- (void)sp_update_hidden {
++    BOOL device = [self sp_device];
++    BOOL show = _panel != nil || (device ? _on_with_device : _user_on);
++    if (!show && !_pad.hidden) [self sp_release_all];
++    if (show == _pad.hidden) {
++        sp_stub_log([NSString stringWithFormat:@"touch controls: %s (controller or keyboard %d)",
++                     show ? "shown" : "hidden", device].UTF8String);
++    }
++    _pad.hidden = !show;
++    _toggle.on = device ? _on_with_device : _user_on;
++    self.hidden = !sp_touch_controls_wanted();
++}
++
++- (void)sp_apply_settings {
++    [_stick sp_release];   // a held key from the old side mode goes up as the key it was
++    _pad.alpha = sp_ts_alpha[sp_ts[SP_TS_OPACITY]];
++    if (!sp_ts[SP_TS_LOOK]) [_look sp_release];
++    _look.hidden = !sp_ts[SP_TS_LOOK];
++    [self setNeedsLayout];
++}
++
++- (void)sp_settings {
++    if (_panel) {
++        [self sp_settings_done];
++        return;
++    }
++    _panel = [[SPSettingsPanel alloc] initWithFrame:CGRectZero];
++    __weak SPTouchControls *weak = self;
++    _panel.changed = ^{ [weak sp_apply_settings]; };
++    _panel.done = ^{ [weak sp_settings_done]; };
++    [self addSubview:_panel];
++    _gear.on = YES;
++    [self sp_update_hidden];
++    [self setNeedsLayout];
++}
++
++- (void)sp_settings_done {
++    [_panel removeFromSuperview];
++    _panel = nil;
++    _gear.on = NO;
++    [self sp_update_hidden];
++}
++
++- (void)sp_keyboard:(BOOL)chat {
++    if (_sink.isFirstResponder) [_sink sp_close];
++    else [_sink sp_open:chat];
++}
++
++- (void)sp_keyboard_changed:(BOOL)open {
++    _kbd.on = open;
++}
++
++- (void)sp_keyboard_hidden {
++    if (_sink.isFirstResponder) return;
++    _kbd.on = NO;
++    if (!self.superview.isFirstResponder) [self.superview becomeFirstResponder];
++}
++
++// The strip's buttons and the panel, for the root view's pointInside: (the strip is outside the game,
++// where the root view takes no touch).
++- (BOOL)sp_claims:(CGPoint)p {
++    if (self.hidden) return NO;
++    for (UIView *v in @[ _toggle, _gear, _esc, _kbd ])
++        if (!v.hidden && [v pointInside:[self convertPoint:p toView:v] withEvent:nil]) return YES;
++    return _panel && CGRectContainsPoint(_panel.frame, p);
 +}
 +
 +// Placed from the game rect (the window less the Dynamic Island's strip), sized from its height, so
-+// they sit the same on every iPhone and iPad. Large, for a thumb: the stick lower left with Auto Run
-+// above it, and on the right Interact, the one used most, biggest and lowest, where the thumb rests,
-+// with Fishing to its left and Jump above it. Well clear of the screen's edges: the root view defers
-+// the system's edge gestures (preferredScreenEdgesDeferringSystemGestures), and for that iOS holds
-+// back touches that start near an edge, which made a stick in the corner answer late.
++// they sit the same on every iPhone and iPad, times the settings' sizes. For a thumb: the stick lower
++// left with Auto Run above it, and on the right Interact, the one used most, biggest and lowest, where
++// the thumb rests, with Fishing to its left, Jump above it, and the camera pad in the corner between.
++// Well clear of the screen's edges: the root view defers the system's edge gestures
++// (preferredScreenEdgesDeferringSystemGestures), and for that iOS holds back touches that start near
++// an edge, which made a stick in the corner answer late.
 +- (void)layoutSubviews {
 +    [super layoutSubviews];
 +    CGRect g = sp_game_rect();
-+    if (CGRectIsEmpty(g)) g = self.bounds;
 +    CGRect b = self.bounds;
++    if (CGRectIsEmpty(g)) g = b;
++    _pad.frame = b;
 +    CGFloat h = g.size.height;
 +    CGFloat margin = MAX(h * 0.09, 40);  // from the screen's edges, not the game rect's
 +    CGFloat bottom = MIN(CGRectGetMaxY(g), CGRectGetMaxY(b) - margin);
 +    CGFloat left = MAX(CGRectGetMinX(g) + h * 0.04, CGRectGetMinX(b) + margin);
 +    CGFloat right = MIN(CGRectGetMaxX(g) - h * 0.04, CGRectGetMaxX(b) - margin);
++    CGFloat ss = sp_ts_size[sp_ts[SP_TS_STICK]], bs = sp_ts_size[sp_ts[SP_TS_BUTTONS]];
 +
-+    CGFloat r = MIN(h * 0.19, 96);       // the stick's radius
++    CGFloat r = MIN(h * 0.165, 82) * ss;  // the stick's radius
 +    _stick.bounds = CGRectMake(0, 0, 2 * r, 2 * r);
-+    _stick.center = CGPointMake(left + r, bottom - r - h * 0.02);
++    _stick.rest = CGPointMake(left + r, bottom - r - h * 0.02);
 +
-+    CGFloat big = MIN(h * 0.22, 104), mid = MIN(h * 0.17, 84), small = MIN(h * 0.13, 64);
++    CGFloat big = MIN(h * 0.22, 104) * bs, mid = MIN(h * 0.17, 84) * bs, small = MIN(h * 0.13, 64) * bs;
 +    _interact.bounds = CGRectMake(0, 0, big, big);
 +    _fish.bounds = _jump.bounds = CGRectMake(0, 0, mid, mid);
 +    _autorun.bounds = CGRectMake(0, 0, small, small);
 +    _interact.center = CGPointMake(right - big / 2, bottom - big / 2 - h * 0.02);
 +    _fish.center = CGPointMake(_interact.center.x - big / 2 - mid * 0.75, _interact.center.y - big * 0.45);
 +    _jump.center = CGPointMake(_interact.center.x, _interact.center.y - big / 2 - mid * 0.8);
-+    _autorun.center = CGPointMake(_stick.center.x + r * 0.9, _stick.center.y - r - small * 0.75);
++    _autorun.center = CGPointMake(_stick.rest.x + r * 0.9, _stick.rest.y - r - small * 0.75);
++
++    // The camera pad: left of Jump, above Fishing, kept to the right half and below the top eighth.
++    CGFloat lx1 = CGRectGetMinX(_jump.frame) - mid * 0.1, ly1 = CGRectGetMinY(_fish.frame) - mid * 0.12;
++    CGFloat lx0 = MAX(lx1 - big * 1.5, CGRectGetMidX(g) + 20), ly0 = MAX(ly1 - big * 1.05, CGRectGetMinY(g) + h * 0.12);
++    _look.frame = CGRectMake(lx0, ly0, MAX(0, lx1 - lx0), MAX(0, ly1 - ly0));
++
++    // The strip's buttons: Touch and the gear at its top, Esc and the keyboard at its bottom, clear of
++    // the island in the middle and of the screen's rounded corners. With no strip (an iPad), a column
++    // at the game's left edge, around the middle.
++    CGRect strip = CGRectNull;
++    if (CGRectGetMinX(g) - CGRectGetMinX(b) >= 30)
++        strip = CGRectMake(CGRectGetMinX(b), CGRectGetMinY(b), CGRectGetMinX(g) - CGRectGetMinX(b), b.size.height);
++    else if (CGRectGetMaxX(b) - CGRectGetMaxX(g) >= 30)
++        strip = CGRectMake(CGRectGetMaxX(g), CGRectGetMinY(b), CGRectGetMaxX(b) - CGRectGetMaxX(g), b.size.height);
++    CGFloat bw, bh = 40, x;
++    CGFloat ys[4];
++    if (!CGRectIsNull(strip)) {
++        bw = MIN(strip.size.width - 6, 50);
++        x = CGRectGetMidX(strip);
++        ys[0] = CGRectGetMinY(strip) + 80;
++        ys[1] = ys[0] + 48;
++        ys[3] = CGRectGetMaxY(strip) - 80;
++        ys[2] = ys[3] - 48;
++    } else {
++        bw = 50;
++        x = CGRectGetMinX(g) + 8 + bw / 2;
++        for (int i = 0; i < 4; i++) ys[i] = CGRectGetMidY(g) + (i - 1.5) * 50;
++    }
++    NSArray<UIView *> *col = @[ _toggle, _gear, _esc, _kbd ];
++    for (int i = 0; i < 4; i++) {
++        col[i].bounds = CGRectMake(0, 0, bw, bh);
++        col[i].center = CGPointMake(x, ys[i]);
++    }
++
++    if (_panel) {
++        CGFloat pw = MIN(430, g.size.width - 40), ph = MIN(34 + SP_TS_COUNT * 36 + 54, h - 20);
++        _panel.frame = CGRectMake(CGRectGetMidX(g) - pw / 2, CGRectGetMidY(g) - ph / 2, pw, ph);
++    }
 +}
 +@end
++
++// The root view's pointInside: for a point in the strip beside the game: the strip's buttons take it.
++static BOOL sp_touch_controls_claim(UIView *root, CGPoint p) {
++    SPTouchControls *c = (SPTouchControls *)sp_touch_controls;
++    return c && [c sp_claims:[c convertPoint:p fromView:root]];
++}
 +#endif
 +
  // ---- the UIKit side: the scene's root view collects input
-@@ -710,2 +1012,8 @@
+@@ -710,2 +1775,8 @@
      [self addSubview:sp_cursor_view];
 +#if !TARGET_OS_VISION
 +    sp_touch_controls = [[SPTouchControls alloc] initWithFrame:self.bounds];
@@ -320,3 +1083,7 @@
 +    [self addSubview:sp_touch_controls];
 +#endif
      if (!getenv("SP_CURSOR_SYSTEM")) [self addInteraction:[[UIPointerInteraction alloc] initWithDelegate:self]];
+@@ -750,2 +1821,3 @@
+     if (![super pointInside:point withEvent:event]) return NO;
++    if (sp_touch_controls_claim(self, point)) return YES;  // the touch controls' buttons in the strip
+     return !sp_told_rect.size.width || CGRectContainsPoint(sp_game_rect(), point);
