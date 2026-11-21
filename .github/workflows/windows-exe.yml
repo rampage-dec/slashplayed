@@ -1,11 +1,15 @@
+# Baut slashplayed-cli.exe (apps/companion-rs, das Programm fuer die Eingabeaufforderung) auf einem Windows-Runner von GitHub.
+# Von Hand starten: Actions > Build Windows exe > Run workflow.
+# Start mit  --kit <slashplayed-device-kit-touch.zip>.
+# Abgeleitet von companion-rs-build.yml, ohne Tests, Paketierung und Kit-Hash.
 name: Build Windows exe
- 
+
 on:
   workflow_dispatch:
- 
+
 permissions:
   contents: read
- 
+
 jobs:
   build:
     runs-on: windows-latest
@@ -19,11 +23,20 @@ jobs:
     steps:
       - name: Keep line endings
         run: git config --global core.autocrlf false
- 
+
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
- 
+
+      - name: Apply local patches (patches/*.patch)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for p in patches/*.patch; do
+            echo "applying $p"
+            git apply --verbose "$p"
+          done
+
       - name: Install the pinned Rust toolchain
         working-directory: apps/companion-rs
         run: |
@@ -31,22 +44,22 @@ jobs:
           TC=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
           echo "Rust $TC"
           rustup toolchain install "$TC" --profile minimal
- 
+
       - name: Fetch zsign's source
         run: scripts/build-zsign.sh source
- 
+
       - name: Build
         working-directory: apps/companion-rs
-        run: cargo build --release --locked --target x86_64-pc-windows-msvc
- 
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc --bin slashplayed-cli
+
       - name: Show the result
         run: |
-          ls -l apps/companion-rs/target/x86_64-pc-windows-msvc/release/slashplayed-companion.exe
-          sha256sum apps/companion-rs/target/x86_64-pc-windows-msvc/release/slashplayed-companion.exe
- 
+          ls -l apps/companion-rs/target/x86_64-pc-windows-msvc/release/slashplayed-cli.exe
+          sha256sum apps/companion-rs/target/x86_64-pc-windows-msvc/release/slashplayed-cli.exe
+
       - uses: actions/upload-artifact@v4
         with:
-          name: slashplayed-companion-windows
-          path: apps/companion-rs/target/x86_64-pc-windows-msvc/release/slashplayed-companion.exe
+          name: slashplayed-cli-windows
+          path: apps/companion-rs/target/x86_64-pc-windows-msvc/release/slashplayed-cli.exe
           if-no-files-found: error
           retention-days: 30
