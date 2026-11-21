@@ -1,0 +1,30 @@
+diff --git a/apps/client/spapple/src/lib.rs b/apps/client/spapple/src/lib.rs
+index caee738..247c016 100644
+--- a/apps/client/spapple/src/lib.rs
++++ b/apps/client/spapple/src/lib.rs
+@@ -92,7 +92,7 @@ struct ProfilesRequest {
+ /// is refused for SMS 2FA, and every request after the login has to claim the one the login did.
+ fn client_info_override() -> AnisetteClientInfo {
+     AnisetteClientInfo {
+-        client_info: "<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>".into(),
++        client_info: "<Mac15,7> <Mac OS X;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>".into(),
+         user_agent: "akd/1.0 CFNetwork/811.5.4".into(),
+     }
+ }
+diff --git a/apps/companion-rs/src/account.rs b/apps/companion-rs/src/account.rs
+index aed47ee..b24cf48 100644
+--- a/apps/companion-rs/src/account.rs
++++ b/apps/companion-rs/src/account.rs
+@@ -35,9 +35,11 @@ pub const DEFAULT_ANISETTE: &str = "https://mac-ani.jkcoxson.com";
+ 
+ /// The client identity iloader 2.4.1 sends in place of the server's (its fix for SMS 2FA 403s), which
+ /// every request of the login must then claim.
++/// "Mac OS X", not "macOS": since 2026-11-20 Apple's sign-in server (gsa.apple.com) answers 503 to any
++/// login whose client info says "macOS;" (SideStore issue #1745; Poki Setup 0.2.8 made the same change).
+ fn client_info_override() -> AnisetteClientInfo {
+     AnisetteClientInfo {
+-        client_info: "<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>".into(),
++        client_info: "<Mac15,7> <Mac OS X;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>".into(),
+         user_agent: "akd/1.0 CFNetwork/811.5.4".into(),
+     }
+ }
